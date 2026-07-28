@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/renanqts/external-dns-openwrt-webhook/pkg/logger"
+	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/logger"
 	"go.uber.org/zap"
 )
 
@@ -23,6 +23,7 @@ const (
 	rpcPath  = "/cgi-bin/luci/rpc/"
 	authPath = rpcPath + "auth"
 	uciPath  = rpcPath + "uci"
+	sysPath  = rpcPath + "sys"
 
 	methodLogin = "login"
 )
@@ -37,6 +38,9 @@ var (
 
 type LuciRPC interface {
 	Uci(context.Context, string, []string) (string, error)
+	// Sys calls the rpc/sys endpoint, which exposes the luci.sys Lua module.
+	// Used to reload dnsmasq without applying unrelated staged UCI configs.
+	Sys(context.Context, string, []string) (string, error)
 }
 
 type Payload struct {
@@ -78,6 +82,10 @@ func New(config *Config) (LuciRPC, error) {
 
 func (c *lucirpc) Uci(ctx context.Context, method string, params []string) (string, error) {
 	return c.rpcWithAuth(ctx, uciPath, method, params)
+}
+
+func (c *lucirpc) Sys(ctx context.Context, method string, params []string) (string, error) {
+	return c.rpcWithAuth(ctx, sysPath, method, params)
 }
 
 func (c *lucirpc) auth(ctx context.Context) error {

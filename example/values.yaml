@@ -1,11 +1,11 @@
 logLevel: info
-policy: upsert-only
+policy: sync
 provider:
   name: webhook
   webhook:
     image:
-      repository: renanqts/external-dns-openwrt-webhook
-      tag: v0.1.0
+      repository: ghcr.io/vizzletf/external-dns-openwrt-webhook
+      tag: v0.2.0
     livenessProbe:
       httpGet:
         path: /ping
@@ -34,6 +34,9 @@ provider:
         value: "8888"
       - name: ROUTER_GIN_RELEASE_MODE
         value: "true"
+      # dnsmasq | uci-apply | none — see README
+      - name: PROVIDER_OPENWRT_RELOADSTRATEGY
+        value: dnsmasq
       - name: PROVIDER_OPENWRT_LUCIRPC_HOSTNAME
         value: "192.168.1.1"
       - name: PROVIDER_OPENWRT_LUCIRPC_PORT

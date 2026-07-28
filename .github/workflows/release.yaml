@@ -1,0 +1,41 @@
+name: publish image
+
+on:
+  push:
+    tags: [ "v*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: ko-build/setup-ko@v0.9
+
+      # ghcr rejects upper-case path segments, the owner is VizzleTF.
+      - name: Resolve image repository
+        id: repo
+        run: echo "value=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to ghcr
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | ko login ghcr.io --username '${{ github.actor }}' --password-stdin
+
+      - name: Build and push
+        env:
+          KO_DOCKER_REPO: ${{ steps.repo.outputs.value }}
+        run: |
+          ko build ./cmd/webhook \
+            --bare \
+            --platform=linux/amd64,linux/arm64 \
+            --tags="${GITHUB_REF_NAME},latest" \
+            --image-refs=image-refs.txt
+          cat image-refs.txt

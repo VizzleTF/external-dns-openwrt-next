@@ -3,12 +3,13 @@ package openwrt
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
+	mocks "github.com/VizzleTF/external-dns-openwrt-webhook/internal/mocks/lucirpc"
+	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/logger"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	mocks "github.com/renanqts/external-dns-openwrt-webhook/internal/mocks/lucirpc"
-	"github.com/renanqts/external-dns-openwrt-webhook/pkg/logger"
 	"go.uber.org/mock/gomock"
 )
 
@@ -48,361 +49,276 @@ var _ = Describe("OpenWRT", func() {
 		mockCtrl.Finish()
 	})
 
-	Context("Get DNS", func() {
-		It("get all records", func() {
-			expectedJson, err := json.Marshal(map[string]DNSRecord{
-				"x": {
-					Type: "domain",
-					Name: "foobar",
-					IP:   "1.1.1.1",
-				},
-				"y": {
-					Type:   "cname",
-					CName:  "foobar",
-					Target: "bar.foo.com",
-				},
-				"z": {
-					Type: "whatever",
-				},
-			})
-			Expect(err).To(BeNil())
-			mockLuciRPC.EXPECT().Uci(ctx, "get_all", []string{"dhcp"}).Return(string(expectedJson), nil)
-			o := openWRT{
-				lucirpc: mockLuciRPC,
+	// newOpenWRT builds the unit under test with the narrow reload strategy.
+	newOpenWRT := func() *openWRT {
+		return &openWRT{
+			lucirpc:        mockLuciRPC,
+			reloadStrategy: ReloadStrategyDnsmasq,
+		}
+	}
+
+	// expectGetAll stubs `uci get_all dhcp`. Tests describe the router state in
+	// normalised terms (A/CNAME); the wire format uses the UCI section types,
+	// so translate before marshalling. Anything else is passed through as-is.
+	expectGetAll := func(records map[string]DNSRecord) {
+		raw := make(map[string]DNSRecord, len(records))
+		for section, record := range records {
+			switch record.Type {
+			case RecordTypeA:
+				raw[section] = DNSRecord{Type: sectionTypeDomain, Name: record.Name, IP: record.IP}
+			case RecordTypeCNAME:
+				raw[section] = DNSRecord{Type: sectionTypeCName, CName: record.CName, Target: record.Target}
+			default:
+				raw[section] = record
 			}
-			resultDNS, err := o.GetDNSRecords(ctx)
+		}
+
+		payload, err := json.Marshal(raw)
+		Expect(err).To(BeNil())
+		mockLuciRPC.EXPECT().Uci(ctx, "get_all", []string{"dhcp"}).Return(string(payload), nil)
+	}
+
+	expectCommitAndReload := func() {
+		mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{"dhcp"}).Return("", nil)
+		mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqReloadCommand}).Return("0", nil)
+	}
+
+	Context("Get DNS", func() {
+		It("normalises section types and drops everything else", func() {
+			expectGetAll(map[string]DNSRecord{
+				"x": {Type: "domain", Name: "foobar", IP: "1.1.1.1"},
+				"y": {Type: "cname", CName: "foobar", Target: "bar.foo.com"},
+				"z": {Type: "whatever"},
+			})
+
+			resultDNS, err := newOpenWRT().GetDNSRecords(ctx)
 			Expect(err).To(BeNil())
-			Expect(resultDNS).ToNot(BeNil())
 			Expect(resultDNS).To(Equal(map[string]DNSRecord{
-				"x": {
-					Type: "A",
-					Name: "foobar",
-					IP:   "1.1.1.1",
-				},
-				"y": {
-					Type:   "CNAME",
-					CName:  "foobar",
-					Target: "bar.foo.com",
-				},
+				"x": {Type: RecordTypeA, Name: "foobar", IP: "1.1.1.1"},
+				"y": {Type: RecordTypeCNAME, CName: "foobar", Target: "bar.foo.com"},
 			}))
 		})
 	})
 
-	Context("Set DNS", func() {
-		It("set A record with success", func() {
-			cfg := "foobar"
-			ip := "1.1.1.1"
-			name := "foo.bar.com"
-
+	Context("Add", func() {
+		It("adds an A record, then commits and reloads once", func() {
+			cfg := "cfg01"
+			expectGetAll(map[string]DNSRecord{})
 			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{"dhcp", "domain"}).Return(cfg, nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "name", name}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "ip", ip}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{"dhcp"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "name", "foo.bar.com"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "ip", "1.1.1.1"}).Return("", nil)
+			expectCommitAndReload()
 
-			o := openWRT{
-				lucirpc: mockLuciRPC,
-			}
-			err := o.SetDNSRecords(ctx, []DNSRecord{
-				{
-					Type: "A",
-					IP:   ip,
-					Name: name,
-				},
+			err := newOpenWRT().ApplyDNSRecords(ctx, nil, []DNSRecord{
+				{Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
 			})
 			Expect(err).To(BeNil())
 		})
 
-		It("A without name", func() {
-			o := openWRT{}
-			err := o.SetDNSRecords(ctx, []DNSRecord{
-				{
-					Type: "A",
-					IP:   "1.1.1.1",
-				},
-			})
-			Expect(err).ToNot(BeNil())
-			Expect(err.Error()).To(Equal("name is required"))
-		})
-
-		It("A without ip", func() {
-			o := openWRT{}
-			err := o.SetDNSRecords(ctx, []DNSRecord{
-				{
-					Type: "A",
-					Name: "foobar",
-				},
-			})
-			Expect(err).ToNot(BeNil())
-			Expect(err.Error()).To(Equal("ip is required"))
-		})
-
-		It("set CNAME record", func() {
-			cfg := "foobar"
-			cname := "foo.bar.com"
-			target := "bar.foo.com"
-
+		It("adds a CNAME record", func() {
+			cfg := "cfg02"
+			expectGetAll(map[string]DNSRecord{})
 			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{"dhcp", "cname"}).Return(cfg, nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "cname", cname}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "target", target}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{"dhcp"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "cname", "foo.bar.com"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "target", "bar.foo.com"}).Return("", nil)
+			expectCommitAndReload()
 
-			o := openWRT{
-				lucirpc: mockLuciRPC,
-			}
-			err := o.SetDNSRecords(ctx, []DNSRecord{
-				{
-					Type:   "CNAME",
-					CName:  cname,
-					Target: target,
-				},
+			err := newOpenWRT().ApplyDNSRecords(ctx, nil, []DNSRecord{
+				{Type: RecordTypeCNAME, CName: "foo.bar.com", Target: "bar.foo.com"},
 			})
 			Expect(err).To(BeNil())
 		})
 
-		It("CNAME without cname", func() {
-			o := openWRT{}
-			err := o.SetDNSRecords(ctx, []DNSRecord{
-				{
-					Type:   "CNAME",
-					Target: "foo.bar.com",
-				},
+		It("is idempotent when the record is already there", func() {
+			expectGetAll(map[string]DNSRecord{
+				"x": {Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
 			})
-			Expect(err).ToNot(BeNil())
-			Expect(err.Error()).To(Equal("cname is required"))
+			// No add, no commit, no reload.
+
+			err := newOpenWRT().ApplyDNSRecords(ctx, nil, []DNSRecord{
+				{Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
+			})
+			Expect(err).To(BeNil())
 		})
 
-		It("CNAME without target", func() {
-			o := openWRT{}
-			err := o.SetDNSRecords(ctx, []DNSRecord{
-				{
-					Type:  "CNAME",
-					CName: "foobar",
-				},
+		It("rejects an A record without an ip", func() {
+			expectGetAll(map[string]DNSRecord{})
+
+			err := newOpenWRT().ApplyDNSRecords(ctx, nil, []DNSRecord{
+				{Type: RecordTypeA, Name: "foo.bar.com"},
 			})
 			Expect(err).ToNot(BeNil())
-			Expect(err.Error()).To(Equal("target is required"))
+			Expect(err.Error()).To(ContainSubstring("ip is required"))
+		})
+
+		It("rejects a CNAME record without a target", func() {
+			expectGetAll(map[string]DNSRecord{})
+
+			err := newOpenWRT().ApplyDNSRecords(ctx, nil, []DNSRecord{
+				{Type: RecordTypeCNAME, CName: "foo.bar.com"},
+			})
+			Expect(err).ToNot(BeNil())
+			Expect(err.Error()).To(ContainSubstring("target is required"))
 		})
 	})
 
-	Context("Update DNS", func() {
-		It("update A record", func() {
-			cfg := "x"
-			dnsName := "happy.com"
-			updatedIP := "2.2.2.2"
-
-			expectedCurrentDNSRecords := map[string]DNSRecord{
-				cfg: {
-					Type: "domain",
-					Name: dnsName,
-					IP:   "1.1.1.1",
-				},
-				"y": {
-					Type:   "cname",
-					CName:  "foo.bar.com",
-					Target: "bar.foo.com",
-				},
-			}
-
-			expectedCurrentJson, err := json.Marshal(expectedCurrentDNSRecords)
-			Expect(err).To(BeNil())
-			mockLuciRPC.EXPECT().Uci(ctx, "get_all", []string{"dhcp"}).Return(string(expectedCurrentJson), nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", cfg}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{"dhcp", "domain"}).Return(cfg, nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "name", dnsName}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "ip", updatedIP}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{"dhcp"}).Return("", nil)
-
-			o := openWRT{
-				lucirpc: mockLuciRPC,
-			}
-			err = o.UpdateDNSRecords(ctx, []DNSRecord{
-				{
-					Type: "A",
-					Name: dnsName,
-					IP:   updatedIP,
-				},
+	Context("Delete", func() {
+		It("deletes the matching section", func() {
+			expectGetAll(map[string]DNSRecord{
+				"x": {Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
 			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", "x"}).Return("", nil)
+			expectCommitAndReload()
+
+			err := newOpenWRT().ApplyDNSRecords(ctx, []DNSRecord{
+				{Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
+			}, nil)
 			Expect(err).To(BeNil())
 		})
 
-		It("update CNAME record", func() {
-			cfg := "y"
-			cname := "happy.com"
-			updatedTarget := "foo.bar.com"
+		It("treats an already absent record as success and skips the commit", func() {
+			expectGetAll(map[string]DNSRecord{})
+			// Upstream returned "records not found" here, which made
+			// ExternalDNS retry the whole change set forever.
 
-			expectedCurrentDNSRecords := map[string]DNSRecord{
-				"x": {
-					Type: "domain",
-					Name: "happy.com",
-					IP:   "1.1.1.1",
-				},
-				cfg: {
-					Type:   "cname",
-					CName:  cname,
-					Target: "bar.foo.com",
-				},
-			}
-
-			expectedCurrentJson, err := json.Marshal(expectedCurrentDNSRecords)
-			Expect(err).To(BeNil())
-			mockLuciRPC.EXPECT().Uci(ctx, "get_all", []string{"dhcp"}).Return(string(expectedCurrentJson), nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", cfg}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{"dhcp", "cname"}).Return(cfg, nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "cname", cname}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "target", updatedTarget}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{"dhcp"}).Return("", nil)
-
-			o := openWRT{
-				lucirpc: mockLuciRPC,
-			}
-			err = o.UpdateDNSRecords(ctx, []DNSRecord{
-				{
-					Type:   "CNAME",
-					CName:  cname,
-					Target: updatedTarget,
-				},
-			})
+			err := newOpenWRT().ApplyDNSRecords(ctx, []DNSRecord{
+				{Type: RecordTypeA, Name: "gone.bar.com", IP: "1.1.1.1"},
+			}, nil)
 			Expect(err).To(BeNil())
 		})
 
-		It("not found", func() {
-			expectedCurrentDNSRecords := map[string]DNSRecord{
-				"x": {
-					Type: "A",
-					Name: "happy.com",
-					IP:   "1.1.1.1",
-				},
-				"y": {
-					Type:   "CNAME",
-					CName:  "foo.bar.com",
-					Target: "bar.foo.com",
-				},
-			}
-
-			expectedCurrentJson, err := json.Marshal(expectedCurrentDNSRecords)
-			Expect(err).To(BeNil())
-			mockLuciRPC.EXPECT().Uci(ctx, "get_all", []string{"dhcp"}).Return(string(expectedCurrentJson), nil)
-
-			o := openWRT{
-				lucirpc: mockLuciRPC,
-			}
-			err = o.UpdateDNSRecords(ctx, []DNSRecord{
-				{
-					Type:   "CNAME",
-					CName:  "whatever",
-					Target: "3.3.3.3",
-				},
+		It("deletes every requested record, not just the first", func() {
+			// Regression: the upstream loop mutated the slice it was ranging
+			// over, so records after a removal were skipped.
+			expectGetAll(map[string]DNSRecord{
+				"a": {Type: RecordTypeA, Name: "one.bar.com", IP: "1.1.1.1"},
+				"b": {Type: RecordTypeA, Name: "two.bar.com", IP: "2.2.2.2"},
+				"c": {Type: RecordTypeA, Name: "three.bar.com", IP: "3.3.3.3"},
 			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", "a"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", "b"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", "c"}).Return("", nil)
+			expectCommitAndReload()
+
+			err := newOpenWRT().ApplyDNSRecords(ctx, []DNSRecord{
+				{Type: RecordTypeA, Name: "one.bar.com", IP: "1.1.1.1"},
+				{Type: RecordTypeA, Name: "two.bar.com", IP: "2.2.2.2"},
+				{Type: RecordTypeA, Name: "three.bar.com", IP: "3.3.3.3"},
+			}, nil)
+			Expect(err).To(BeNil())
+		})
+
+		It("deletes only the target that was asked for on a multi-target name", func() {
+			// Regression: matching on the name alone deleted whichever section
+			// the random map iteration happened to hit first.
+			expectGetAll(map[string]DNSRecord{
+				"keep": {Type: RecordTypeA, Name: "multi.bar.com", IP: "1.1.1.1"},
+				"drop": {Type: RecordTypeA, Name: "multi.bar.com", IP: "2.2.2.2"},
+			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", "drop"}).Return("", nil)
+			expectCommitAndReload()
+
+			err := newOpenWRT().ApplyDNSRecords(ctx, []DNSRecord{
+				{Type: RecordTypeA, Name: "multi.bar.com", IP: "2.2.2.2"},
+			}, nil)
+			Expect(err).To(BeNil())
+		})
+
+		It("propagates a delete failure", func() {
+			expectGetAll(map[string]DNSRecord{
+				"x": {Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
+			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", "x"}).Return("", errors.New("boom"))
+
+			err := newOpenWRT().ApplyDNSRecords(ctx, []DNSRecord{
+				{Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
+			}, nil)
 			Expect(err).ToNot(BeNil())
-			Expect(err.Error()).To(Equal("records not found: [{CNAME   whatever 3.3.3.3}]"))
+			Expect(err.Error()).To(ContainSubstring("boom"))
 		})
 	})
 
-	Context("Delete DNS", func() {
-		It("delete A record", func() {
-			cfg := "x"
-			name := "happy.com"
-			ip := "2.2.2.2"
+	Context("Update", func() {
+		It("removes the old target and adds the new one in a single commit", func() {
+			cfg := "cfg03"
+			expectGetAll(map[string]DNSRecord{
+				"x": {Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
+			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", "x"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{"dhcp", "domain"}).Return(cfg, nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "name", "foo.bar.com"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{"dhcp", cfg, "ip", "9.9.9.9"}).Return("", nil)
+			expectCommitAndReload()
 
-			expectedCurrentDNSRecords := map[string]DNSRecord{
-				cfg: {
-					Type: "domain",
-					Name: name,
-					IP:   ip,
-				},
-				"y": {
-					Type:   "cname",
-					CName:  "foo.bar.com",
-					Target: "bar.foo.com",
-				},
-			}
-
-			expectedCurrentJson, err := json.Marshal(expectedCurrentDNSRecords)
+			err := newOpenWRT().ApplyDNSRecords(ctx,
+				[]DNSRecord{{Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"}},
+				[]DNSRecord{{Type: RecordTypeA, Name: "foo.bar.com", IP: "9.9.9.9"}},
+			)
 			Expect(err).To(BeNil())
-			mockLuciRPC.EXPECT().Uci(ctx, "get_all", []string{"dhcp"}).Return(string(expectedCurrentJson), nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", cfg}).Return("", nil)
+		})
+	})
+
+	Context("Reload strategies", func() {
+		It("skips the reload entirely when disabled", func() {
+			expectGetAll(map[string]DNSRecord{
+				"x": {Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
+			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", "x"}).Return("", nil)
 			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{"dhcp"}).Return("", nil)
 
-			o := openWRT{
-				lucirpc: mockLuciRPC,
-			}
-			err = o.DeleteDNSRecords(ctx, []DNSRecord{
-				{
-					Type: "A",
-					Name: name,
-					IP:   ip,
-				},
-			})
+			o := &openWRT{lucirpc: mockLuciRPC, reloadStrategy: ReloadStrategyNone}
+			err := o.ApplyDNSRecords(ctx, []DNSRecord{
+				{Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
+			}, nil)
 			Expect(err).To(BeNil())
 		})
 
-		It("delete CNAME record", func() {
-			cfg := "y"
-			cname := "happy.com"
-			target := "foo.bar.com"
-
-			expectedCurrentDNSRecords := map[string]DNSRecord{
-				"x": {
-					Type: "domain",
-					Name: "happy.com",
-					IP:   "1.1.1.1",
-				},
-				cfg: {
-					Type:   "cname",
-					CName:  cname,
-					Target: target,
-				},
-			}
-
-			expectedCurrentJson, err := json.Marshal(expectedCurrentDNSRecords)
-			Expect(err).To(BeNil())
-			mockLuciRPC.EXPECT().Uci(ctx, "get_all", []string{"dhcp"}).Return(string(expectedCurrentJson), nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", cfg}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{"dhcp"}).Return("", nil)
-
-			o := openWRT{
-				lucirpc: mockLuciRPC,
-			}
-			err = o.DeleteDNSRecords(ctx, []DNSRecord{
-				{
-					Type:   "CNAME",
-					CName:  cname,
-					Target: target,
-				},
+		It("calls uci apply with NO arguments so rollback is not armed", func() {
+			expectGetAll(map[string]DNSRecord{
+				"x": {Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
 			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", "x"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{"dhcp"}).Return("", nil)
+			// Passing a config name here would be read as rollback=true and
+			// the change would revert itself after ~90s.
+			mockLuciRPC.EXPECT().Uci(ctx, "apply", []string{}).Return("", nil)
+
+			o := &openWRT{lucirpc: mockLuciRPC, reloadStrategy: ReloadStrategyUciApply}
+			err := o.ApplyDNSRecords(ctx, []DNSRecord{
+				{Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
+			}, nil)
 			Expect(err).To(BeNil())
 		})
 
-		It("not found", func() {
-			expectedCurrentDNSRecords := map[string]DNSRecord{
-				"x": {
-					Type: "domain",
-					Name: "happy.com",
-					IP:   "1.1.1.1",
-				},
-				"y": {
-					Type:   "cname",
-					CName:  "foo.bar.com",
-					Target: "bar.foo.com",
-				},
-			}
-
-			expectedCurrentJson, err := json.Marshal(expectedCurrentDNSRecords)
-			Expect(err).To(BeNil())
-			mockLuciRPC.EXPECT().Uci(ctx, "get_all", []string{"dhcp"}).Return(string(expectedCurrentJson), nil)
-
-			o := openWRT{
-				lucirpc: mockLuciRPC,
-			}
-			err = o.DeleteDNSRecords(ctx, []DNSRecord{
-				{
-					Type:   "CNAME",
-					CName:  "whatever",
-					Target: "3.3.3.3",
-				},
+		It("reports a failed reload", func() {
+			expectGetAll(map[string]DNSRecord{
+				"x": {Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
 			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{"dhcp", "x"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{"dhcp"}).Return("", nil)
+			mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqReloadCommand}).Return("", errors.New("no acl"))
+
+			err := newOpenWRT().ApplyDNSRecords(ctx, []DNSRecord{
+				{Type: RecordTypeA, Name: "foo.bar.com", IP: "1.1.1.1"},
+			}, nil)
 			Expect(err).ToNot(BeNil())
-			Expect(err.Error()).To(Equal("records not found: [{CNAME   whatever 3.3.3.3}]"))
+			Expect(err.Error()).To(ContainSubstring("reload dnsmasq"))
+		})
+	})
+
+	Context("No-op", func() {
+		It("does not even read the router when there is nothing to do", func() {
+			err := newOpenWRT().ApplyDNSRecords(ctx, nil, nil)
+			Expect(err).To(BeNil())
+		})
+	})
+
+	Context("Config", func() {
+		It("accepts the known strategies and rejects anything else", func() {
+			Expect(validateReloadStrategy(ReloadStrategyDnsmasq)).To(BeNil())
+			Expect(validateReloadStrategy(ReloadStrategyUciApply)).To(BeNil())
+			Expect(validateReloadStrategy(ReloadStrategyNone)).To(BeNil())
+			Expect(validateReloadStrategy("nope")).ToNot(BeNil())
 		})
 	})
 })
