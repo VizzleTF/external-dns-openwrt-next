@@ -5,8 +5,8 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/logger"
 	"github.com/gin-gonic/gin"
-	"github.com/renanqts/external-dns-openwrt-webhook/pkg/logger"
 	"go.uber.org/zap"
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"

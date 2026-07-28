@@ -1,4 +1,4 @@
-module github.com/renanqts/external-dns-openwrt-webhook
+module github.com/VizzleTF/external-dns-openwrt-webhook
 
 go 1.23.4
 
