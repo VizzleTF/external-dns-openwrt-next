@@ -1,15 +1,15 @@
 package logger
 
 type Config struct {
-	Level      string `mapstructure:"level"`
-	StackTrace bool   `mapstructure:"stack_trace"`
-	Encoding   string `mapstructure:"encoding"`
+	// Level is one of debug, info, warn, error.
+	Level string `mapstructure:"level"`
+	// Encoding is "json" or "console".
+	Encoding string `mapstructure:"encoding"`
 }
 
 func DefaultConfig() *Config {
 	return &Config{
-		Level:      "info",
-		StackTrace: false,
-		Encoding:   "json",
+		Level:    "info",
+		Encoding: "json",
 	}
 }

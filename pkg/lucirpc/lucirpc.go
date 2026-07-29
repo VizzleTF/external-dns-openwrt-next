@@ -32,9 +32,8 @@ const (
 var (
 	ErrRpcLoginFail = errors.New("rpc: login fail")
 
-	ErrHttpUnauthenticated = errors.New("http: Unauthenticated")
-	ErrHttpUnauthorized    = errors.New("http: Unauthorized")
-	ErrHttpForbidden       = errors.New("http: Forbidden")
+	ErrHttpUnauthorized = errors.New("http: Unauthorized")
+	ErrHttpForbidden    = errors.New("http: Forbidden")
 )
 
 type LuciRPC interface {
