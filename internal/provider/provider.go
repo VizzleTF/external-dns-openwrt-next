@@ -4,8 +4,8 @@ import (
 	"context"
 	"sort"
 
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/logger"
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/openwrt"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/openwrt"
 	"go.uber.org/zap"
 	"sigs.k8s.io/external-dns/endpoint"
 	"sigs.k8s.io/external-dns/plan"

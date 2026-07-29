@@ -1,4 +1,4 @@
-module github.com/VizzleTF/external-dns-openwrt-webhook
+module github.com/VizzleTF/external-dns-openwrt-next
 
 go 1.23.4
 

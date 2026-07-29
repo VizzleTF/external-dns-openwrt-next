@@ -13,9 +13,11 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/logger"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
 	"go.uber.org/zap"
 )
 
@@ -57,8 +59,24 @@ type Response struct {
 
 type lucirpc struct {
 	config     *Config
-	token      string
 	httpClient *http.Client
+
+	// ExternalDNS drives /records and /records concurrently with the health
+	// endpoint, and re-authentication rewrites the token, so guard it.
+	mu    sync.RWMutex
+	token string
+}
+
+func (c *lucirpc) getToken() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token
+}
+
+func (c *lucirpc) setToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.token = token
 }
 
 func New(config *Config) (LuciRPC, error) {
@@ -101,7 +119,7 @@ func (c *lucirpc) auth(ctx context.Context) error {
 		return ErrRpcLoginFail
 	}
 
-	c.token = token
+	c.setToken(token)
 	return nil
 }
 
@@ -141,22 +159,27 @@ func (c *lucirpc) rpc(ctx context.Context, path, method string, params []string)
 }
 
 func (c *lucirpc) getUri(path, method string) string {
-	logger.Log.Debug("uri", zap.String("path", path), zap.String("method", method), zap.String("token", c.token))
+	// The auth token is a credential — never log it.
+	logger.Log.Debug("uri", zap.String("path", path), zap.String("method", method))
 	proto := "https://"
 	if !c.config.SSL {
 		proto = "http://"
 	}
 
 	url := proto + c.config.Hostname + ":" + strconv.Itoa(c.config.Port) + path
-	if method != methodLogin && c.token != "" {
-		url = url + "?auth=" + c.token
+	if method != methodLogin {
+		if token := c.getToken(); token != "" {
+			url = url + "?auth=" + token
+		}
 	}
 
 	return url
 }
 
 func (c *lucirpc) call(ctx context.Context, url string, postBody []byte) ([]byte, error) {
-	logger.Log.Debug("call", zap.String("url", url), zap.String("postBody", string(postBody)))
+	// Neither the URL nor the body may be logged as-is: the URL carries
+	// ?auth=<session token> and a login body carries the router password.
+	logger.Log.Debug("call", zap.String("url", redactURL(url)))
 	body := bytes.NewReader(postBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 	if err != nil {
@@ -207,6 +230,14 @@ func (c *lucirpc) rpcWithAuth(ctx context.Context, path, method string, params [
 	}
 
 	return c.rpc(ctx, path, method, params)
+}
+
+// redactURL strips the query string, which is where the session token lives.
+func redactURL(url string) string {
+	if idx := strings.IndexByte(url, '?'); idx >= 0 {
+		return url[:idx] + "?<redacted>"
+	}
+	return url
 }
 
 func parseString(obj interface{}) (string, error) {

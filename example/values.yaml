@@ -5,7 +5,7 @@ provider:
   webhook:
     image:
       repository: ghcr.io/vizzletf/external-dns-openwrt-webhook
-      tag: v0.2.0
+      tag: v0.3.0
     livenessProbe:
       httpGet:
         path: /ping
@@ -37,6 +37,15 @@ provider:
       # dnsmasq | uci-apply | none — see README
       - name: PROVIDER_OPENWRT_RELOADSTRATEGY
         value: dnsmasq
+      # Ownership: only records carrying this marker are managed. Required
+      # before policy=sync, otherwise ExternalDNS may delete records it did
+      # not create. Empty disables ownership.
+      - name: PROVIDER_OPENWRT_OWNERSHIPID
+        value: external-dns
+      - name: PROVIDER_OPENWRT_OWNERSHIPOPTION
+        value: external_dns
+      - name: PROVIDER_OPENWRT_ADOPTEXISTING
+        value: "true"
       - name: PROVIDER_OPENWRT_LUCIRPC_HOSTNAME
         value: "192.168.1.1"
       - name: PROVIDER_OPENWRT_LUCIRPC_PORT

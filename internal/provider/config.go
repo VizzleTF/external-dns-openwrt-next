@@ -1,7 +1,7 @@
 package provider
 
 import (
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/openwrt"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/openwrt"
 )
 
 type Config struct {

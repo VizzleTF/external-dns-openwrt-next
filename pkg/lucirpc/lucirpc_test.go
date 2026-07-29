@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/logger"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 )
@@ -57,7 +57,7 @@ var _ = Describe("Luci RPC", func() {
 			config.Hostname = hostname
 			config.Port = port
 
-			client := lucirpc{
+			client := &lucirpc{
 				config:     config,
 				httpClient: ts.Client(),
 			}
@@ -92,7 +92,7 @@ var _ = Describe("Luci RPC", func() {
 			config.Hostname = hostname
 			config.Port = port
 
-			client := lucirpc{
+			client := &lucirpc{
 				config:     config,
 				httpClient: ts.Client(),
 			}
@@ -123,7 +123,7 @@ var _ = Describe("Luci RPC", func() {
 			config.Hostname = hostname
 			config.Port = port
 
-			client := lucirpc{
+			client := &lucirpc{
 				config:     config,
 				httpClient: ts.Client(),
 			}
@@ -154,7 +154,7 @@ var _ = Describe("Luci RPC", func() {
 			config.Hostname = hostname
 			config.Port = port
 
-			client := lucirpc{
+			client := &lucirpc{
 				config:     config,
 				httpClient: ts.Client(),
 			}
@@ -187,7 +187,7 @@ var _ = Describe("Luci RPC", func() {
 			config.Port = port
 			config.SSL = false
 
-			client := lucirpc{
+			client := &lucirpc{
 				config:     config,
 				httpClient: ts.Client(),
 			}
