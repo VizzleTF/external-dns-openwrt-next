@@ -2,7 +2,7 @@
 apiVersion: skaffold/v4beta11
 kind: Config
 metadata:
-  name: external-dns-openwrt-webhook
+  name: external-dns-openwrt-next
 build:
   artifacts:
     - image: webhook

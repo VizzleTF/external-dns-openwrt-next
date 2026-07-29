@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.5.0
+
+### Fixed
+
+- **Unsupported record types caused a permanent plan loop.** ExternalDNS
+  manages `A`, `AAAA` and `CNAME` by default, but this provider can only write
+  `A` and `CNAME`. An `AAAA` endpoint was therefore planned, silently skipped
+  at write time, found missing on the next `Records()` call, and planned again
+  — forever. `AdjustEndpoints` now drops unsupported types with a warning.
+- **A per-record TTL had the same effect.** `domain`/`cname` sections carry no
+  TTL, so an endpoint asking for one could never match what `Records()` reports.
+  `AdjustEndpoints` now strips it.
+- `PROVIDER_OPENWRT_OWNERSHIPOPTION` is validated at startup against the
+  characters UCI accepts (`[A-Za-z0-9_]`). Previously a bad value was only
+  discovered when the first record failed to write.
+
+### Changed
+
+- CI additionally runs `go test -race`.
+- Repository hygiene after the fork: `CODEOWNERS`, skaffold/k3d artifact names,
+  and a README configuration table replacing the stale line-number anchors.
+
 ## v0.4.0
 
 ### Fixed
