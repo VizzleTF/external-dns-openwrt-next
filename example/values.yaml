@@ -24,8 +24,6 @@ provider:
         value: "5"
       - name: LOG_LEVEL
         value: info
-      - name: LOG_STACK_TRACE
-        value: "false"
       - name: LOG_ENCODING
         value: json
       - name: ROUTER_HEALTHCHECK_INTERVAL

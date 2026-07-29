@@ -15,7 +15,7 @@ deploy:
     - name: external-dns
       repo: https://kubernetes-sigs.github.io/external-dns
       remoteChart: external-dns
-      version: 1.15.2
+      version: 1.21.1
       setValueTemplates:
         provider:
           webhook:
