@@ -133,8 +133,32 @@ actually changed, and DHCP leases survive in `/tmp/dhcp.leases`.
 > calls it with an empty argument list.
 
 ## Configuration Options
-You can find all the environment variables allowed as well as the default in the [values file](example/values.yaml#L19).   
-The installation can be achieved via [helm chart](skaffold.yaml#L15-L26).
+
+Every environment variable, with its default, is listed in the
+[example values file](example/values.yaml). Deployment is via the upstream
+[external-dns helm chart](https://github.com/kubernetes-sigs/external-dns/tree/master/charts/external-dns)
+with this webhook as a sidecar — see [skaffold.yaml](skaffold.yaml) for a
+working local setup.
+
+| Variable | Default | Meaning |
+| -------- | ------- | ------- |
+| `PROVIDER_OPENWRT_LUCIRPC_HOSTNAME` | `192.168.1.1` | Router address |
+| `PROVIDER_OPENWRT_LUCIRPC_PORT` | `443` | LuCI port |
+| `PROVIDER_OPENWRT_LUCIRPC_SSL` | `true` | Use HTTPS |
+| `PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME` / `_PASSWORD` | — | LuCI credentials |
+| `PROVIDER_OPENWRT_RELOADSTRATEGY` | `restart` | See [Reload strategy](#reload-strategy) |
+| `PROVIDER_OPENWRT_OWNERSHIPID` | *(empty)* | See [Ownership](#ownership--required-before-policy-sync) |
+| `PROVIDER_OPENWRT_OWNERSHIPOPTION` | `external_dns` | UCI option holding the ownership ID |
+| `PROVIDER_OPENWRT_ADOPTEXISTING` | `true` | Adopt matching unmarked sections |
+
+## Supported records
+
+`A` and `CNAME` only. Anything else is dropped in `AdjustEndpoints` with a
+warning rather than being planned and silently skipped on every run.
+
+Per-record TTLs are not supported either — `domain`/`cname` sections have no TTL
+field and dnsmasq answers them from its global `local_ttl` — so a TTL on the
+desired endpoint is stripped for the same reason.
 
 ## Credits
 

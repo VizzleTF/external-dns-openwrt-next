@@ -2,6 +2,7 @@ package openwrt
 
 import (
 	"fmt"
+	"regexp"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/lucirpc"
 )
@@ -102,6 +103,21 @@ func DefaultConfig() *Config {
 // OwnershipEnabled reports whether the provider is scoped to its own records.
 func (c *Config) OwnershipEnabled() bool {
 	return c.OwnershipID != ""
+}
+
+// uciOptionName matches what UCI accepts as an option name. A value outside
+// this set is rejected by `uci set` at write time, which would otherwise only
+// surface on the first record the provider tries to create.
+var uciOptionName = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+
+func validateOwnershipOption(option string) error {
+	if !uciOptionName.MatchString(option) {
+		return fmt.Errorf(
+			"invalid ownership option %q, expected only letters, digits and underscores",
+			option,
+		)
+	}
+	return nil
 }
 
 func validateReloadStrategy(strategy string) error {

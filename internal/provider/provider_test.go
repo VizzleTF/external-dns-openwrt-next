@@ -178,6 +178,44 @@ var _ = Describe("Provider Suite", func() {
 		})
 	})
 
+	Context("adjust endpoints", func() {
+		It("drops record types this provider cannot write", func() {
+			// Left in place they would be planned, silently skipped at write
+			// time, and re-planned on every run.
+			p := &Provider{openwrt: mockOpenWRT}
+			adjusted, err := p.AdjustEndpoints([]*endpoint.Endpoint{
+				{DNSName: "a.foobar.com", RecordType: endpoint.RecordTypeA, Targets: []string{"1.1.1.1"}},
+				{DNSName: "aaaa.foobar.com", RecordType: endpoint.RecordTypeAAAA, Targets: []string{"::1"}},
+				{DNSName: "txt.foobar.com", RecordType: endpoint.RecordTypeTXT, Targets: []string{"hi"}},
+				{DNSName: "c.foobar.com", RecordType: endpoint.RecordTypeCNAME, Targets: []string{"a.foobar.com"}},
+			})
+
+			Expect(err).To(BeNil())
+			Expect(adjusted).To(HaveLen(2))
+			Expect(adjusted[0].DNSName).To(Equal("a.foobar.com"))
+			Expect(adjusted[1].DNSName).To(Equal("c.foobar.com"))
+		})
+
+		It("strips a per-record TTL that dnsmasq cannot honour", func() {
+			p := &Provider{openwrt: mockOpenWRT}
+			adjusted, err := p.AdjustEndpoints([]*endpoint.Endpoint{
+				{DNSName: "a.foobar.com", RecordType: endpoint.RecordTypeA,
+					Targets: []string{"1.1.1.1"}, RecordTTL: endpoint.TTL(60)},
+			})
+
+			Expect(err).To(BeNil())
+			Expect(adjusted).To(HaveLen(1))
+			Expect(adjusted[0].RecordTTL.IsConfigured()).To(BeFalse())
+		})
+
+		It("handles an empty and a nil-containing list", func() {
+			p := &Provider{openwrt: mockOpenWRT}
+			adjusted, err := p.AdjustEndpoints([]*endpoint.Endpoint{nil})
+			Expect(err).To(BeNil())
+			Expect(adjusted).To(BeEmpty())
+		})
+	})
+
 	Context("records", func() {
 		It("reads through to the router", func() {
 			mockOpenWRT.EXPECT().GetDNSRecords(ctx).Return(map[string]openwrt.DNSRecord{

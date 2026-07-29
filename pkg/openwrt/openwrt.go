@@ -47,6 +47,10 @@ func New(cfg *Config) (OpenWRT, error) {
 		option = DefaultOwnershipOption
 	}
 
+	if err := validateOwnershipOption(option); err != nil {
+		return nil, err
+	}
+
 	lrcp, err := lucirpc.New(cfg.LuciRPC)
 	if err != nil {
 		return nil, err

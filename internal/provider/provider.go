@@ -15,9 +15,9 @@ import (
 // defaultTTL is what Records() reports for every record.
 //
 // UCI `domain` and `cname` sections carry no per-record TTL — dnsmasq answers
-// them with its global `local_ttl`. Endpoints that request an explicit TTL
-// therefore cannot be honoured; ExternalDNS will keep planning an update for
-// them on every run.
+// them with its global `local_ttl`. AdjustEndpoints strips any TTL from the
+// desired state so the plan cannot keep asking for one this provider is unable
+// to honour.
 const defaultTTL = 300
 
 type Provider struct {
@@ -71,6 +71,44 @@ func (p *Provider) ApplyChanges(ctx context.Context, changes *plan.Changes) erro
 	}
 
 	return p.openwrt.ApplyDNSRecords(ctx, remove, add)
+}
+
+// AdjustEndpoints trims the desired state down to what this provider can
+// actually represent.
+//
+// Both adjustments exist to stop the plan from churning. ExternalDNS compares
+// the desired endpoints with what Records() reports, so anything the provider
+// silently drops at write time would be re-planned on every single run:
+//
+//   - record types other than A and CNAME cannot be written to UCI at all;
+//   - per-record TTLs do not exist in `domain`/`cname` sections, so an endpoint
+//     asking for one would never match what Records() reports.
+func (p *Provider) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*endpoint.Endpoint, error) {
+	adjusted := make([]*endpoint.Endpoint, 0, len(endpoints))
+
+	for _, ep := range endpoints {
+		if ep == nil {
+			continue
+		}
+
+		switch ep.RecordType {
+		case endpoint.RecordTypeA, endpoint.RecordTypeCNAME:
+		default:
+			logger.Log.Warn("dropping endpoint, record type not supported by this provider",
+				zap.String("name", ep.DNSName), zap.String("type", ep.RecordType))
+			continue
+		}
+
+		if ep.RecordTTL.IsConfigured() {
+			logger.Log.Debug("dropping per-record TTL, dnsmasq serves these from its global local_ttl",
+				zap.String("name", ep.DNSName), zap.Int64("ttl", int64(ep.RecordTTL)))
+			ep.RecordTTL = 0
+		}
+
+		adjusted = append(adjusted, ep)
+	}
+
+	return adjusted, nil
 }
 
 func (p *Provider) Records(ctx context.Context) ([]*endpoint.Endpoint, error) {

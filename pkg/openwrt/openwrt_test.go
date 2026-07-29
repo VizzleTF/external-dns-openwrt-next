@@ -425,6 +425,14 @@ var _ = Describe("OpenWRT", func() {
 			Expect(validateReloadStrategy("nope")).ToNot(BeNil())
 		})
 
+		It("rejects an ownership option that UCI would not accept", func() {
+			Expect(validateOwnershipOption("external_dns")).To(BeNil())
+			Expect(validateOwnershipOption("externalDns2")).To(BeNil())
+			Expect(validateOwnershipOption("external-dns")).ToNot(BeNil())
+			Expect(validateOwnershipOption("external dns")).ToNot(BeNil())
+			Expect(validateOwnershipOption("")).ToNot(BeNil())
+		})
+
 		It("reports whether ownership is enabled", func() {
 			Expect((&Config{}).OwnershipEnabled()).To(BeFalse())
 			Expect((&Config{OwnershipID: testOwner}).OwnershipEnabled()).To(BeTrue())
