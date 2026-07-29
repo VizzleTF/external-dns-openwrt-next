@@ -101,9 +101,29 @@ Set with `PROVIDER_OPENWRT_RELOADSTRATEGY`:
 
 | Value | Behaviour |
 | ----- | --------- |
-| `dnsmasq` (default) | Runs `/etc/init.d/dnsmasq reload` over the `rpc/sys` endpoint. Narrowest option — no other service and no other UCI config is touched. |
+| `restart` (default) | Runs `/etc/init.d/dnsmasq restart` over the `rpc/sys` endpoint. The only strategy that applies **both** record types. |
+| `reload` | Runs `/etc/init.d/dnsmasq reload`. **Verified ineffective where dnsmasq runs under ujail** (see below), and never applies CNAMEs. `dnsmasq` is accepted as a legacy alias. |
 | `uci-apply` | Calls `uci apply` with no arguments. Commits and applies **every** pending UCI config, not just `dhcp`, so anything an admin left staged is applied too. Use when the RPC user cannot reach `rpc/sys`. |
-| `none` | Upstream behaviour: commit only. Records land in `/etc/config/dhcp` but dnsmasq keeps serving the previous set. |
+| `none` | Commit only. Records land in `/etc/config/dhcp` but dnsmasq keeps serving the previous set. |
+
+### Why a restart, and not a reload
+
+The two record types land in different places, and only one of them survives a reload:
+
+| Record | Written to | Picked up by |
+| ------ | ---------- | ------------ |
+| `A` | hostfile `/tmp/hosts/dhcp.*` | `SIGHUP` re-reads hostfiles |
+| `CNAME` | `--cname=` in `/var/etc/dnsmasq.conf.*` | only a restart — dnsmasq reads its config file once, at startup |
+
+On top of that, `reload` was measured doing nothing at all on OpenWrt 25: dnsmasq
+runs inside **ujail**, `reload_service()` is
+`rc_procd start_service; procd_send_signal dnsmasq`, and the signal reaches the
+jail wrapper rather than the daemon. The regenerated hostfile contained the new
+record while the running dnsmasq — started days earlier — kept answering
+`NXDOMAIN` for it.
+
+A restart costs roughly a second of DNS/DHCP downtime, runs only when records
+actually changed, and DHCP leases survive in `/tmp/dhcp.leases`.
 
 > **Never call LuCI's `uci apply` with a config name.** Its JSON-RPC binding is
 > `function apply(config) return uci:apply(config) end`, but the underlying

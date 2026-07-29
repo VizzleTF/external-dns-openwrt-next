@@ -80,7 +80,7 @@ var _ = Describe("OpenWRT", func() {
 	owning := func() *openWRT {
 		return &openWRT{
 			lucirpc:         mockLuciRPC,
-			reloadStrategy:  ReloadStrategyDnsmasq,
+			reloadStrategy:  ReloadStrategyRestart,
 			ownershipID:     testOwner,
 			ownershipOption: DefaultOwnershipOption,
 			adoptExisting:   true,
@@ -91,7 +91,7 @@ var _ = Describe("OpenWRT", func() {
 	unscoped := func() *openWRT {
 		return &openWRT{
 			lucirpc:         mockLuciRPC,
-			reloadStrategy:  ReloadStrategyDnsmasq,
+			reloadStrategy:  ReloadStrategyRestart,
 			ownershipOption: DefaultOwnershipOption,
 		}
 	}
@@ -104,7 +104,7 @@ var _ = Describe("OpenWRT", func() {
 
 	expectCommitAndReload := func() {
 		mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{uciConfig}).Return("", nil)
-		mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqReloadCommand}).Return("0", nil)
+		mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqRestartCommand}).Return("0", nil)
 	}
 
 	aRecord := func(name, ip string) DNSRecord {
@@ -352,6 +352,32 @@ var _ = Describe("OpenWRT", func() {
 			Expect(o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)).To(BeNil())
 		})
 
+		It("uses the reload command when explicitly asked for it", func() {
+			expectGetAll(map[string]map[string]any{
+				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
+			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{uciConfig}).Return("", nil)
+			mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqReloadCommand}).Return("0", nil)
+
+			o := owning()
+			o.reloadStrategy = ReloadStrategyReload
+			Expect(o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)).To(BeNil())
+		})
+
+		It("treats the legacy \"dnsmasq\" value as reload", func() {
+			expectGetAll(map[string]map[string]any{
+				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
+			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{uciConfig}).Return("", nil)
+			mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqReloadCommand}).Return("0", nil)
+
+			o := owning()
+			o.reloadStrategy = "dnsmasq"
+			Expect(o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)).To(BeNil())
+		})
+
 		It("calls uci apply with NO arguments so rollback is not armed", func() {
 			expectGetAll(map[string]map[string]any{
 				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
@@ -373,11 +399,11 @@ var _ = Describe("OpenWRT", func() {
 			})
 			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
 			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{uciConfig}).Return("", nil)
-			mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqReloadCommand}).Return("", errors.New("no acl"))
+			mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqRestartCommand}).Return("", errors.New("no acl"))
 
 			err := owning().ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)
 			Expect(err).ToNot(BeNil())
-			Expect(err.Error()).To(ContainSubstring("reload dnsmasq"))
+			Expect(err.Error()).To(ContainSubstring("restart dnsmasq"))
 		})
 	})
 
@@ -389,7 +415,11 @@ var _ = Describe("OpenWRT", func() {
 
 	Context("config", func() {
 		It("accepts the known reload strategies and rejects anything else", func() {
-			Expect(validateReloadStrategy(ReloadStrategyDnsmasq)).To(BeNil())
+			Expect(validateReloadStrategy(ReloadStrategyRestart)).To(BeNil())
+			Expect(validateReloadStrategy(ReloadStrategyReload)).To(BeNil())
+			// Legacy alias for the old "dnsmasq" value must keep working.
+			Expect(validateReloadStrategy("dnsmasq")).To(BeNil())
+			Expect(normaliseReloadStrategy("dnsmasq")).To(Equal(ReloadStrategyReload))
 			Expect(validateReloadStrategy(ReloadStrategyUciApply)).To(BeNil())
 			Expect(validateReloadStrategy(ReloadStrategyNone)).To(BeNil())
 			Expect(validateReloadStrategy("nope")).ToNot(BeNil())
@@ -401,6 +431,7 @@ var _ = Describe("OpenWRT", func() {
 			Expect(DefaultConfig().OwnershipEnabled()).To(BeFalse())
 			Expect(DefaultConfig().OwnershipOption).To(Equal(DefaultOwnershipOption))
 			Expect(DefaultConfig().AdoptExisting).To(BeTrue())
+			Expect(DefaultConfig().ReloadStrategy).To(Equal(ReloadStrategyRestart))
 		})
 	})
 })

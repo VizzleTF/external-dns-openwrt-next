@@ -8,10 +8,32 @@ import (
 
 // How dnsmasq is made to pick up committed changes.
 const (
-	// ReloadStrategyDnsmasq runs `/etc/init.d/dnsmasq reload` through the
-	// rpc/sys endpoint. Default: it is the narrowest option — no other
-	// service and no other UCI config is touched.
-	ReloadStrategyDnsmasq = "dnsmasq"
+	// ReloadStrategyRestart runs `/etc/init.d/dnsmasq restart` through the
+	// rpc/sys endpoint. The default, and the only strategy that reliably
+	// applies both record types:
+	//
+	//   - A records land in the hostfile /tmp/hosts/dhcp.*, which dnsmasq
+	//     re-reads on SIGHUP;
+	//   - CNAME records land as `--cname=` in /var/etc/dnsmasq.conf.*, which
+	//     dnsmasq reads once, at startup.
+	//
+	// So nothing short of a restart picks up a CNAME. It costs roughly a
+	// second of DNS/DHCP downtime and only runs when records actually changed;
+	// DHCP leases survive in /tmp/dhcp.leases.
+	ReloadStrategyRestart = "restart"
+
+	// ReloadStrategyReload runs `/etc/init.d/dnsmasq reload`.
+	//
+	// WARNING: verified ineffective on OpenWrt 25 with dnsmasq under ujail.
+	// `reload_service()` is `rc_procd start_service; procd_send_signal dnsmasq`,
+	// and the signal does not reach the jailed process — the files are
+	// regenerated but the running dnsmasq keeps serving the previous set. Kept
+	// for routers where dnsmasq is not jailed, and it never applies CNAMEs.
+	ReloadStrategyReload = "reload"
+
+	// legacyReloadStrategyDnsmasq is the old name for ReloadStrategyReload,
+	// accepted so an outdated config does not fail the provider outright.
+	legacyReloadStrategyDnsmasq = "dnsmasq"
 
 	// ReloadStrategyUciApply calls `uci apply` with no arguments. It commits
 	// and applies EVERY pending UCI config, not just dhcp, so anything an
@@ -21,9 +43,17 @@ const (
 
 	// ReloadStrategyNone reproduces the upstream behaviour: commit only.
 	// Records land in /etc/config/dhcp but dnsmasq keeps serving the old set
-	// until something else reloads it.
+	// until something else restarts it.
 	ReloadStrategyNone = "none"
 )
+
+// normaliseReloadStrategy resolves aliases.
+func normaliseReloadStrategy(strategy string) string {
+	if strategy == legacyReloadStrategyDnsmasq {
+		return ReloadStrategyReload
+	}
+	return strategy
+}
 
 // DefaultOwnershipOption is the UCI option used to mark records this provider
 // owns. UCI section handlers read only the options they know — `dhcp_domain_add`
@@ -62,7 +92,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		LuciRPC:         lucirpc.DefaultConfig(),
-		ReloadStrategy:  ReloadStrategyDnsmasq,
+		ReloadStrategy:  ReloadStrategyRestart,
 		OwnershipID:     "",
 		OwnershipOption: DefaultOwnershipOption,
 		AdoptExisting:   true,
@@ -75,13 +105,14 @@ func (c *Config) OwnershipEnabled() bool {
 }
 
 func validateReloadStrategy(strategy string) error {
-	switch strategy {
-	case ReloadStrategyDnsmasq, ReloadStrategyUciApply, ReloadStrategyNone:
+	switch normaliseReloadStrategy(strategy) {
+	case ReloadStrategyRestart, ReloadStrategyReload, ReloadStrategyUciApply, ReloadStrategyNone:
 		return nil
 	default:
 		return fmt.Errorf(
-			"invalid reload strategy %q, expected one of %q, %q, %q",
-			strategy, ReloadStrategyDnsmasq, ReloadStrategyUciApply, ReloadStrategyNone,
+			"invalid reload strategy %q, expected one of %q, %q, %q, %q",
+			strategy, ReloadStrategyRestart, ReloadStrategyReload,
+			ReloadStrategyUciApply, ReloadStrategyNone,
 		)
 	}
 }

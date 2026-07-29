@@ -5,7 +5,7 @@ provider:
   webhook:
     image:
       repository: ghcr.io/vizzletf/external-dns-openwrt-webhook
-      tag: v0.3.0
+      tag: v0.4.0
     livenessProbe:
       httpGet:
         path: /ping
@@ -34,9 +34,11 @@ provider:
         value: "8888"
       - name: ROUTER_GIN_RELEASE_MODE
         value: "true"
-      # dnsmasq | uci-apply | none — see README
+      # restart | reload | uci-apply | none — see README.
+      # `reload` does nothing where dnsmasq runs under ujail, and never
+      # applies CNAMEs; `restart` is the only strategy that applies both.
       - name: PROVIDER_OPENWRT_RELOADSTRATEGY
-        value: dnsmasq
+        value: restart
       # Ownership: only records carrying this marker are managed. Required
       # before policy=sync, otherwise ExternalDNS may delete records it did
       # not create. Empty disables ownership.

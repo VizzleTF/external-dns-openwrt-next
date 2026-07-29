@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.4.0
+
+### Fixed
+
+- **Records were still not going live.** `PROVIDER_OPENWRT_RELOADSTRATEGY=dnsmasq`
+  ran `/etc/init.d/dnsmasq reload`, which regenerates `/var/etc/dnsmasq.conf.*`
+  and the `/tmp/hosts/dhcp.*` hostfile but does not make the running daemon
+  re-read them: dnsmasq runs inside **ujail**, `reload_service()` is
+  `rc_procd start_service; procd_send_signal dnsmasq`, and the signal reaches
+  the jail wrapper instead of the daemon.
+
+  Measured end to end: a record was committed, the hostfile contained it, and
+  dnsmasq — running since days earlier — still answered `NXDOMAIN`, while
+  another name from the very same hostfile resolved.
+
+  A plain `SIGHUP` would not have been enough either. `A` records live in the
+  hostfile, which `SIGHUP` re-reads, but `CNAME` records are `--cname=` entries
+  in the config file, which dnsmasq reads once at startup.
+
+### Changed
+
+- New default strategy **`restart`** (`/etc/init.d/dnsmasq restart`), the only
+  one that applies both record types. It costs about a second of DNS/DHCP
+  downtime, runs only when records actually changed, and DHCP leases survive in
+  `/tmp/dhcp.leases`.
+- The old `dnsmasq` strategy is renamed **`reload`** and documented as
+  ineffective under ujail. `dnsmasq` still validates, as a legacy alias.
+
 ## v0.3.0
 
 Repository renamed to **external-dns-openwrt-next**; module path and image are
