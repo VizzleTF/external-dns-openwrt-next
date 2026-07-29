@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	mocks "github.com/VizzleTF/external-dns-openwrt-webhook/internal/mocks/openwrt"
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/logger"
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/openwrt"
+	mocks "github.com/VizzleTF/external-dns-openwrt-next/internal/mocks/openwrt"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/openwrt"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"go.uber.org/mock/gomock"

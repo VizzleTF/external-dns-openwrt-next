@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/Depado/ginprom"
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/logger"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
 	ginzap "github.com/gin-contrib/zap"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"

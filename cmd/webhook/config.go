@@ -1,9 +1,9 @@
 package main
 
 import (
-	"github.com/VizzleTF/external-dns-openwrt-webhook/internal/provider"
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/logger"
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/router"
+	"github.com/VizzleTF/external-dns-openwrt-next/internal/provider"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/router"
 )
 
 type Config struct {

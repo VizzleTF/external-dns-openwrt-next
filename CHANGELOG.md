@@ -1,8 +1,45 @@
 # Changelog
 
+## v0.3.0
+
+Repository renamed to **external-dns-openwrt-next**; module path and image are
+now `github.com/VizzleTF/external-dns-openwrt-next` and
+`ghcr.io/vizzletf/external-dns-openwrt-next`.
+
+### Added
+
+- **Record ownership.** Records written by this provider carry a UCI marker
+  option, and only marked sections are reported back to ExternalDNS. Entries
+  created by hand become invisible: they cannot be updated and cannot be
+  deleted, which is what makes `policy: sync` safe on a router that also holds
+  manually maintained DNS. Configured with `PROVIDER_OPENWRT_OWNERSHIPID`
+  (empty = disabled, previous behaviour), `PROVIDER_OPENWRT_OWNERSHIPOPTION`
+  (default `external_dns`) and `PROVIDER_OPENWRT_ADOPTEXISTING`.
+
+  The marker is inert: `dhcp_domain_add` reads only `name`/`ip` and
+  `dhcp_cname_add` only `cname`/`target`, so it never reaches the generated
+  dnsmasq config. A TXT registry is not an option — OpenWrt's UCI has no TXT
+  support at all.
+- **Adoption.** When a record ExternalDNS asks for already exists unmarked, the
+  provider stamps the marker onto that section instead of adding a duplicate.
+  This migrates an existing deployment on the first reconcile, with no manual
+  edits on the router. Sections owned by a different ID are never adopted.
+
+### Fixed
+
+- **Data race on the session token.** The LuCI client wrote `token` from
+  `auth()` while other requests read it, with no synchronisation.
+- **Credentials in debug logs.** The request URL was logged in full including
+  `?auth=<session token>`, the login body was logged with the router password,
+  and the token was logged again on every `getUri` call. The URL is now redacted
+  and the body is not logged.
+- UCI options are decoded loosely instead of through fixed struct tags, so a
+  `domain` section holding a *list* of names is skipped rather than failing the
+  whole read.
+
 ## v0.2.0
 
-First release of the [VizzleTF](https://github.com/VizzleTF/external-dns-openwrt-webhook)
+First release of the [VizzleTF](https://github.com/VizzleTF/external-dns-openwrt-next)
 fork of [renanqts/external-dns-openwrt-webhook](https://github.com/renanqts/external-dns-openwrt-webhook)
 (upstream `v0.1.0`, last code change 2025-02-27).
 
@@ -48,13 +85,13 @@ fork of [renanqts/external-dns-openwrt-webhook](https://github.com/renanqts/exte
   LuCI's binding is `function apply(config)` but the real signature is
   `apply(self, rollback)`, so any non-empty argument arms a ≥90 s rollback
   timer that reverts the change unless confirmed out of band.
-- Container images published to `ghcr.io/vizzletf/external-dns-openwrt-webhook`
+- Container images published to `ghcr.io/vizzletf/external-dns-openwrt-next`
   for `linux/amd64` and `linux/arm64`.
 - Regression tests for each of the fixes above.
 
 ### Changed
 
-- Module path is now `github.com/VizzleTF/external-dns-openwrt-webhook`.
+- Module path is now `github.com/VizzleTF/external-dns-openwrt-next`.
 - `OpenWRT.SetDNSRecords`/`UpdateDNSRecords`/`DeleteDNSRecords` are replaced by
   a single `ApplyDNSRecords(ctx, remove, add)` that reconciles in one pass.
 

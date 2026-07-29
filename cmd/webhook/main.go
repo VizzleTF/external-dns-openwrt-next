@@ -7,11 +7,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/VizzleTF/external-dns-openwrt-webhook/internal/provider"
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/config"
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/logger"
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/router"
-	"github.com/VizzleTF/external-dns-openwrt-webhook/pkg/webhook"
+	"github.com/VizzleTF/external-dns-openwrt-next/internal/provider"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/config"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/router"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhook"
 	"github.com/gin-gonic/gin"
 	"go.uber.org/zap"
 )

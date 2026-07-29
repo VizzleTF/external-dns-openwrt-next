@@ -10,15 +10,30 @@ const (
 
 	sectionTypeDomain = "domain"
 	sectionTypeCName  = "cname"
+
+	optionSectionType = ".type"
+	optionName        = "name"
+	optionIP          = "ip"
+	optionCName       = "cname"
+	optionTarget      = "target"
 )
 
-// DNSRecord represents a DNS record in LuciRPC
+// DNSRecord is a single DNS record, one UCI section.
+//
+// A `domain` section maps to an A record and a `cname` section to a CNAME; each
+// holds exactly one value, so an endpoint with several targets spans several
+// sections.
 type DNSRecord struct {
-	Type   string `json:".type" validate:"required"`
-	IP     string `json:"ip,omitempty"`
-	Name   string `json:"name,omitempty"`
-	CName  string `json:"cname,omitempty"`
-	Target string `json:"target,omitempty"`
+	Type   string
+	IP     string
+	Name   string
+	CName  string
+	Target string
+
+	// Owner is the value of the ownership option on the section, empty when the
+	// section carries no marker. Only meaningful on records read back from the
+	// router — writes take the ID from the provider config.
+	Owner string
 }
 
 // Key is the full identity of a record: type plus BOTH sides of the mapping.
