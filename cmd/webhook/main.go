@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -12,59 +13,59 @@ import (
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/router"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhook"
-	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 func main() {
-	cfg := defaultConfig()
-	if err := config.Read(cfg); err != nil {
-		panic(err)
+	if err := run(); err != nil {
+		fmt.Fprintln(os.Stderr, "fatal:", err)
+		os.Exit(1)
 	}
-
-	if err := logger.Init(cfg.Log); err != nil {
-		panic(err)
-	}
-
-	provider, err := provider.New(cfg.Provider)
-	if err != nil {
-		logger.Log.Fatal("failed to setup provider", zap.Error(err))
-	}
-
-	router, err := router.New(cfg.Router)
-	if err != nil {
-		logger.Log.Fatal("failed to setup router", zap.Error(err))
-	}
-
-	webhook := webhook.New(provider)
-	setupRoutes(router.GetEngine(), webhook)
-
-	go func() {
-		if err = router.Run(); err != nil {
-			logger.Log.Fatal("failed to start server", zap.Error(err))
-		}
-	}()
-
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	<-sigChan
-	logger.Log.Info("termination signal received, shutting down...")
-
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ShutodwnTimeout)*time.Second)
-	if err := router.Shutdown(ctx); err != nil {
-		logger.Log.Error("failed to shutdown server", zap.Error(err))
-	}
-
-	cancel()
-	<-ctx.Done()
-
-	logger.Log.Info("service shutdown completed")
 }
 
-func setupRoutes(r *gin.Engine, webhook *webhook.Webhook) {
-	apiGroup := r.Group("/")
-	apiGroup.GET("/", webhook.Negotiate)
-	apiGroup.GET("/records", webhook.Records)
-	apiGroup.POST("/records", webhook.ApplyChanges)
-	apiGroup.POST("/adjustendpoints", webhook.AdjustEndpoints)
+// run owns the whole lifecycle and returns an error instead of exiting, so
+// every failure path is handled the same way and deferred cleanup still runs.
+func run() error {
+	cfg := defaultConfig()
+	if err := config.Read(cfg); err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	log, err := logger.New(cfg.Log)
+	if err != nil {
+		return fmt.Errorf("setup logger: %w", err)
+	}
+	dnsProvider, err := provider.New(cfg.Provider, log)
+	if err != nil {
+		return fmt.Errorf("setup provider: %w", err)
+	}
+
+	srv := router.New(cfg.Router, log, webhook.New(dnsProvider, log))
+
+	// Buffered: a signal arriving before the receive must not be dropped.
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- srv.Run() }()
+
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErr:
+		if err != nil {
+			return fmt.Errorf("http server: %w", err)
+		}
+		return nil
+	case sig := <-signals:
+		log.Info("termination signal received, shutting down", slog.String("signal", sig.String()))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(cfg.ShutdownTimeout)*time.Second)
+	defer cancel()
+
+	if err := srv.Shutdown(ctx); err != nil {
+		return fmt.Errorf("shutdown server: %w", err)
+	}
+
+	log.Info("service shutdown completed")
+	return nil
 }

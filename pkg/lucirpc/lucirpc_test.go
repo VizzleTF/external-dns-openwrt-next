@@ -20,19 +20,6 @@ func TestLuciRPC(t *testing.T) {
 	defer GinkgoRecover()
 }
 
-var _ = BeforeSuite(func() {
-	if err := logger.Init(&logger.Config{
-		Level:    "debug",
-		Encoding: "console",
-	}); err != nil {
-		panic(err)
-	}
-})
-
-var _ = AfterSuite(func() {
-	_ = logger.Log.Sync()
-})
-
 var _ = Describe("Luci RPC", func() {
 	var ctx context.Context
 
@@ -59,6 +46,7 @@ var _ = Describe("Luci RPC", func() {
 
 			client := &lucirpc{
 				config:     config,
+				log:        logger.Discard(),
 				httpClient: ts.Client(),
 			}
 			Expect(client).ToNot(BeNil())
@@ -94,6 +82,7 @@ var _ = Describe("Luci RPC", func() {
 
 			client := &lucirpc{
 				config:     config,
+				log:        logger.Discard(),
 				httpClient: ts.Client(),
 			}
 			Expect(client).ToNot(BeNil())
@@ -125,6 +114,7 @@ var _ = Describe("Luci RPC", func() {
 
 			client := &lucirpc{
 				config:     config,
+				log:        logger.Discard(),
 				httpClient: ts.Client(),
 			}
 			Expect(client).ToNot(BeNil())
@@ -156,6 +146,7 @@ var _ = Describe("Luci RPC", func() {
 
 			client := &lucirpc{
 				config:     config,
+				log:        logger.Discard(),
 				httpClient: ts.Client(),
 			}
 			Expect(client).ToNot(BeNil())
@@ -189,6 +180,7 @@ var _ = Describe("Luci RPC", func() {
 
 			client := &lucirpc{
 				config:     config,
+				log:        logger.Discard(),
 				httpClient: ts.Client(),
 			}
 			Expect(client).ToNot(BeNil())

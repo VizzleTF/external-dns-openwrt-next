@@ -19,19 +19,6 @@ func TestOpenWRT(t *testing.T) {
 	defer GinkgoRecover()
 }
 
-var _ = BeforeSuite(func() {
-	if err := logger.Init(&logger.Config{
-		Level:    "debug",
-		Encoding: "console",
-	}); err != nil {
-		panic(err)
-	}
-})
-
-var _ = AfterSuite(func() {
-	_ = logger.Log.Sync()
-})
-
 const testOwner = "homelab"
 
 // section builds the raw shape `uci get_all dhcp` returns for one section.
@@ -80,6 +67,7 @@ var _ = Describe("OpenWRT", func() {
 	owning := func() *openWRT {
 		return &openWRT{
 			lucirpc:         mockLuciRPC,
+			log:             logger.Discard(),
 			reloadStrategy:  ReloadStrategyRestart,
 			ownershipID:     testOwner,
 			ownershipOption: DefaultOwnershipOption,
@@ -91,6 +79,7 @@ var _ = Describe("OpenWRT", func() {
 	unscoped := func() *openWRT {
 		return &openWRT{
 			lucirpc:         mockLuciRPC,
+			log:             logger.Discard(),
 			reloadStrategy:  ReloadStrategyRestart,
 			ownershipOption: DefaultOwnershipOption,
 		}

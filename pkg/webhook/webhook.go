@@ -1,188 +1,179 @@
+// Package webhook implements the ExternalDNS webhook provider HTTP contract.
 package webhook
 
 import (
+	"context"
 	"encoding/json"
-	"errors"
+	"log/slog"
 	"net/http"
 
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
-	"sigs.k8s.io/external-dns/endpoint"
-	"sigs.k8s.io/external-dns/plan"
-	"sigs.k8s.io/external-dns/provider"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhookapi"
 )
 
 const (
-	contentTypeHeader    = "Content-Type"
-	contentTypePlaintext = "text/plain"
-	acceptHeader         = "Accept"
-	varyHeader           = "Vary"
+	headerContentType = "Content-Type"
+	headerAccept      = "Accept"
+	headerVary        = "Vary"
 
-	errorAcceptHeader = "client must provide an accept header"
-	errorContentType  = "client must provide a content type"
+	contentTypePlaintext = "text/plain"
 )
 
+// Provider is the behaviour this webhook needs from a DNS backend.
+//
+// Declared here, on the consuming side, so the HTTP layer depends on an
+// abstraction it owns rather than on a concrete implementation.
+type Provider interface {
+	Records(ctx context.Context) ([]*webhookapi.Endpoint, error)
+	ApplyChanges(ctx context.Context, changes *webhookapi.Changes) error
+	AdjustEndpoints(endpoints []*webhookapi.Endpoint) ([]*webhookapi.Endpoint, error)
+	GetDomainFilter() webhookapi.DomainFilter
+}
+
 type Webhook struct {
-	provider provider.Provider
+	provider Provider
+	log      *slog.Logger
 }
 
-func New(provider provider.Provider) *Webhook {
-	return &Webhook{provider: provider}
+func New(provider Provider, log *slog.Logger) *Webhook {
+	return &Webhook{provider: provider, log: log}
 }
 
-func (w *Webhook) contentTypeHeaderCheck(c *gin.Context) error {
-	header := c.GetHeader(contentTypeHeader)
-	if len(header) == 0 {
-		c.Header(contentTypeHeader, contentTypePlaintext)
-		c.AbortWithStatusJSON(http.StatusNotAcceptable, gin.H{"error": errorContentType})
-
-		logger.Log.Error(errorContentType, zap.String("header", header))
-		return errors.New(errorContentType)
-	}
-
-	return w.headerCheck(header, c)
+// Register wires the contract onto a mux. The routes are fixed by the
+// ExternalDNS webhook specification.
+func (w *Webhook) Register(mux *http.ServeMux) {
+	mux.HandleFunc("GET /{$}", w.Negotiate)
+	mux.HandleFunc("GET /records", w.Records)
+	mux.HandleFunc("POST /records", w.ApplyChanges)
+	mux.HandleFunc("POST /adjustendpoints", w.AdjustEndpoints)
 }
 
-func (w *Webhook) acceptHeaderCheck(c *gin.Context) error {
-	header := c.GetHeader(acceptHeader)
-	if len(header) == 0 {
-		c.Header(contentTypeHeader, contentTypePlaintext)
-		c.AbortWithStatusJSON(http.StatusNotAcceptable, gin.H{"error": errorAcceptHeader})
-
-		logger.Log.Error(errorAcceptHeader, zap.String("header", header))
-		return errors.New(errorAcceptHeader)
-	}
-
-	return w.headerCheck(header, c)
-}
-
-func (w *Webhook) headerCheck(header string, c *gin.Context) error {
-	// as we support only one media type version, we can ignore the returned value
-	if _, err := checkAndGetMediaTypeHeaderValue(header); err != nil {
-		c.Header(contentTypeHeader, contentTypePlaintext)
-		c.AbortWithStatusJSON(http.StatusUnsupportedMediaType, gin.H{"error": "client must provide a valid versioned media type"})
-
-		logger.Log.Error("client must provide a valid versioned media type", zap.String("header", header), zap.Error(err))
-		return err
-	}
-
-	return nil
-}
-
-func (w *Webhook) Records(c *gin.Context) {
-	if err := w.acceptHeaderCheck(c); err != nil {
-		logger.Log.Error("accept header check failed", zap.Error(err))
+// Negotiate reports the domain filter this provider serves.
+func (w *Webhook) Negotiate(rw http.ResponseWriter, req *http.Request) {
+	if !w.requireMediaType(rw, req, headerAccept) {
 		return
 	}
 
-	records, err := w.provider.Records(c.Request.Context())
+	w.writeJSON(rw, http.StatusOK, w.provider.GetDomainFilter())
+}
+
+// Records returns everything the provider currently manages.
+func (w *Webhook) Records(rw http.ResponseWriter, req *http.Request) {
+	if !w.requireMediaType(rw, req, headerAccept) {
+		return
+	}
+
+	records, err := w.provider.Records(req.Context())
 	if err != nil {
-		logger.Log.Error("error getting records", zap.Error(err))
-		c.AbortWithStatus(http.StatusInternalServerError)
+		w.fail(rw, "error getting records", err)
 		return
 	}
 
-	c.Header(contentTypeHeader, string(mediaTypeVersion1))
-	c.Header(varyHeader, contentTypeHeader)
-	if err = json.NewEncoder(c.Writer).Encode(records); err != nil {
-		logger.Log.Error("error encoding records", zap.Error(err))
-		c.AbortWithStatus(http.StatusInternalServerError)
+	w.writeJSON(rw, http.StatusOK, records)
+}
+
+// ApplyChanges applies one reconcile step and answers 204 on success, as the
+// specification requires.
+func (w *Webhook) ApplyChanges(rw http.ResponseWriter, req *http.Request) {
+	if !w.requireMediaType(rw, req, headerContentType) {
 		return
+	}
+
+	var changes webhookapi.Changes
+	if !w.decode(rw, req, &changes) {
+		return
+	}
+
+	w.log.Debug("requesting apply changes",
+		slog.Int("create", len(changes.Create)),
+		slog.Int("update_old", len(changes.UpdateOld)),
+		slog.Int("update_new", len(changes.UpdateNew)),
+		slog.Int("delete", len(changes.Delete)))
+
+	if err := w.provider.ApplyChanges(req.Context(), &changes); err != nil {
+		w.fail(rw, "error applying changes", err)
+		return
+	}
+
+	rw.WriteHeader(http.StatusNoContent)
+}
+
+// AdjustEndpoints lets the provider rewrite the desired state before planning.
+func (w *Webhook) AdjustEndpoints(rw http.ResponseWriter, req *http.Request) {
+	if !w.requireMediaType(rw, req, headerContentType) || !w.requireMediaType(rw, req, headerAccept) {
+		return
+	}
+
+	var endpoints []*webhookapi.Endpoint
+	if !w.decode(rw, req, &endpoints) {
+		return
+	}
+
+	adjusted, err := w.provider.AdjustEndpoints(endpoints)
+	if err != nil {
+		w.fail(rw, "error adjusting endpoints", err)
+		return
+	}
+
+	w.log.Debug("adjusted endpoints", slog.Int("endpoints", len(adjusted)))
+	w.writeJSON(rw, http.StatusOK, adjusted)
+}
+
+// requireMediaType enforces the versioned media type on the given header,
+// answering 406 when it is absent and 415 when it is not the one we speak.
+func (w *Webhook) requireMediaType(rw http.ResponseWriter, req *http.Request, header string) bool {
+	value := req.Header.Get(header)
+	if value == "" {
+		w.reject(rw, http.StatusNotAcceptable, "client must provide a "+header+" header", header, value)
+		return false
+	}
+
+	// Only one media type version exists, so the parsed value is not needed.
+	if _, err := checkAndGetMediaTypeHeaderValue(value); err != nil {
+		w.reject(rw, http.StatusUnsupportedMediaType,
+			"client must provide a valid versioned media type", header, value)
+		return false
+	}
+
+	return true
+}
+
+func (w *Webhook) decode(rw http.ResponseWriter, req *http.Request, target any) bool {
+	defer func() { _ = req.Body.Close() }()
+
+	if err := json.NewDecoder(req.Body).Decode(target); err != nil {
+		w.log.Error("error decoding request body", slog.Any("error", err))
+		w.reject(rw, http.StatusBadRequest, "error decoding request body", "", "")
+		return false
+	}
+
+	return true
+}
+
+func (w *Webhook) writeJSON(rw http.ResponseWriter, status int, body any) {
+	rw.Header().Set(headerContentType, string(mediaTypeVersion1))
+	rw.Header().Set(headerVary, headerContentType)
+	rw.WriteHeader(status)
+
+	if err := json.NewEncoder(rw).Encode(body); err != nil {
+		// The status line is already on the wire, so this can only be logged.
+		w.log.Error("error encoding response", slog.Any("error", err))
 	}
 }
 
-func (w *Webhook) ApplyChanges(c *gin.Context) {
-	if err := w.contentTypeHeaderCheck(c); err != nil {
-		logger.Log.Error("content type header check failed", zap.Error(err))
-		return
-	}
+func (w *Webhook) reject(rw http.ResponseWriter, status int, message, header, value string) {
+	w.log.Error(message, slog.String("header", header), slog.String("value", value))
 
-	var changes plan.Changes
-	if err := json.NewDecoder(c.Request.Body).Decode(&changes); err != nil {
-		logger.Log.Error("error decoding changes", zap.Error(err))
-		c.Header(contentTypeHeader, contentTypePlaintext)
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "error decoding changes"})
-		return
-	}
-
-	logger.Log.Debug("requesting apply changes", zap.Int("create", len(changes.Create)),
-		zap.Int("update_old", len(changes.UpdateOld)), zap.Int("update_new", len(changes.UpdateNew)),
-		zap.Int("delete", len(changes.Delete)))
-
-	if err := w.provider.ApplyChanges(c.Request.Context(), &changes); err != nil {
-		logger.Log.Error("error when applying changes", zap.Error(err))
-		c.Header(contentTypeHeader, contentTypePlaintext)
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-
-	// TODO: check if it is required
-	c.Status(http.StatusNoContent)
+	rw.Header().Set(headerContentType, contentTypePlaintext)
+	rw.WriteHeader(status)
+	// ExternalDNS drains the body before reusing the connection, so always
+	// write one.
+	_, _ = rw.Write([]byte(message))
 }
 
-func (w *Webhook) AdjustEndpoints(c *gin.Context) {
-	if err := w.contentTypeHeaderCheck(c); err != nil {
-		logger.Log.Error("content type header check failed", zap.Error(err))
-		return
-	}
+func (w *Webhook) fail(rw http.ResponseWriter, message string, err error) {
+	w.log.Error(message, slog.Any("error", err))
 
-	if err := w.acceptHeaderCheck(c); err != nil {
-		logger.Log.Error("accept header check failed", zap.Error(err))
-		return
-	}
-
-	var pve []*endpoint.Endpoint
-	if err := json.NewDecoder(c.Request.Body).Decode(&pve); err != nil {
-		c.Header(contentTypeHeader, contentTypePlaintext)
-		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "error decoding request body"})
-		return
-	}
-
-	logger.Log.Debug("webhook adjust endpoints", zap.Int("endpoints", len(pve)))
-	c.Header(contentTypeHeader, contentTypePlaintext)
-	pve, err := w.provider.AdjustEndpoints(pve)
-	if err != nil {
-		c.Header(varyHeader, contentTypeHeader)
-		logger.Log.Error("error adjusting endpoints", zap.Error(err))
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-
-	c.Header(contentTypeHeader, string(mediaTypeVersion1))
-	c.Header(varyHeader, contentTypeHeader)
-
-	out, err := json.Marshal(&pve)
-	if err != nil {
-		logger.Log.Error("error encoding adjusted endpoints", zap.Error(err))
-	}
-
-	if _, err := c.Writer.Write(out); err != nil {
-		logger.Log.Error("error writing response", zap.Error(err))
-	}
-
-	logger.Log.Debug("adjusted endpoints", zap.Int("endpoints", len(pve)))
-}
-
-func (w *Webhook) Negotiate(c *gin.Context) {
-	if err := w.acceptHeaderCheck(c); err != nil {
-		logger.Log.Error("accept header check failed", zap.Error(err))
-		return
-	}
-
-	b, err := json.Marshal(w.provider.GetDomainFilter())
-	if err != nil {
-		logger.Log.Error("error marshaling domain filter", zap.Error(err))
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
-
-	c.Header(contentTypeHeader, string(mediaTypeVersion1))
-
-	_, err = c.Writer.Write(b)
-	if err != nil {
-		logger.Log.Error("error writing response", zap.Error(err))
-		c.AbortWithStatus(http.StatusInternalServerError)
-		return
-	}
+	rw.Header().Set(headerContentType, contentTypePlaintext)
+	rw.WriteHeader(http.StatusInternalServerError)
+	_, _ = rw.Write([]byte(message))
 }

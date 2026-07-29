@@ -7,7 +7,7 @@ import (
 )
 
 type Config struct {
-	ShutodwnTimeout int              `mapstructure:"shutdown_timeout_seconds"`
+	ShutdownTimeout int              `mapstructure:"shutdown_timeout_seconds"`
 	Log             *logger.Config   `mapstructure:"log"`
 	Router          *router.Config   `mapstructure:"router"`
 	Provider        *provider.Config `mapstructure:"provider"`
@@ -15,7 +15,7 @@ type Config struct {
 
 func defaultConfig() *Config {
 	return &Config{
-		ShutodwnTimeout: 5,
+		ShutdownTimeout: 5,
 		Log:             logger.DefaultConfig(),
 		Router:          router.DefaultConfig(),
 		Provider:        provider.DefaultConfig(),

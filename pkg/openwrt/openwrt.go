@@ -5,9 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/lucirpc"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 //go:generate mockgen -destination=../../internal/mocks/openwrt/openwrt.go -package=mocks . OpenWRT
@@ -30,6 +29,7 @@ type OpenWRT interface {
 
 type openWRT struct {
 	lucirpc        lucirpc.LuciRPC
+	log            *slog.Logger
 	reloadStrategy string
 
 	ownershipID     string
@@ -37,7 +37,7 @@ type openWRT struct {
 	adoptExisting   bool
 }
 
-func New(cfg *Config) (OpenWRT, error) {
+func New(cfg *Config, log *slog.Logger) (OpenWRT, error) {
 	if err := validateReloadStrategy(cfg.ReloadStrategy); err != nil {
 		return nil, err
 	}
@@ -51,21 +51,22 @@ func New(cfg *Config) (OpenWRT, error) {
 		return nil, err
 	}
 
-	lrcp, err := lucirpc.New(cfg.LuciRPC)
+	lrcp, err := lucirpc.New(cfg.LuciRPC, log)
 	if err != nil {
 		return nil, err
 	}
 
 	if cfg.OwnershipEnabled() {
-		logger.Log.Info("ownership enabled, only marked records are managed",
-			zap.String("option", option), zap.String("id", cfg.OwnershipID),
-			zap.Bool("adopt_existing", cfg.AdoptExisting))
+		log.Info("ownership enabled, only marked records are managed",
+			slog.String("option", option), slog.String("id", cfg.OwnershipID),
+			slog.Bool("adopt_existing", cfg.AdoptExisting))
 	} else {
-		logger.Log.Warn("ownership disabled, every domain/cname section is reported — do not combine with policy=sync")
+		log.Warn("ownership disabled, every domain/cname section is reported — do not combine with policy=sync")
 	}
 
 	return &openWRT{
 		lucirpc:         lrcp,
+		log:             log,
 		reloadStrategy:  cfg.ReloadStrategy,
 		ownershipID:     cfg.OwnershipID,
 		ownershipOption: option,
@@ -94,8 +95,8 @@ func (o *openWRT) GetDNSRecords(ctx context.Context) (map[string]DNSRecord, erro
 		records[section] = record
 	}
 
-	logger.Log.Debug("current records",
-		zap.Int("managed", len(records)), zap.Int("not_owned", skipped))
+	o.log.Debug("current records",
+		slog.Int("managed", len(records)), slog.Int("not_owned", skipped))
 	return records, nil
 }
 
@@ -145,7 +146,7 @@ func (o *openWRT) parseSection(options map[string]any) (DNSRecord, bool) {
 	// A `domain` section may carry a list of names, which this provider cannot
 	// represent as a single record. Skip rather than mangle it.
 	if record.DNSName() == "" || record.Value() == "" {
-		logger.Log.Debug("skipping section that is not a single-valued record")
+		o.log.Debug("skipping section that is not a single-valued record")
 		return DNSRecord{}, false
 	}
 
@@ -201,7 +202,7 @@ func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) 
 	}
 
 	if changed == 0 {
-		logger.Log.Debug("nothing changed, skipping commit")
+		o.log.Debug("nothing changed, skipping commit")
 		return nil
 	}
 
@@ -217,7 +218,7 @@ func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) 
 func (o *openWRT) removeRecord(ctx context.Context, index *sectionIndex, record DNSRecord) (int, error) {
 	sections := index.owned(record.Key(), o.ownershipID, o.ownershipEnabled())
 	if len(sections) == 0 {
-		logger.Log.Info("record already absent, nothing to delete", recordFields(record)...)
+		o.log.Info("record already absent, nothing to delete", recordFields(record)...)
 		return 0, nil
 	}
 
@@ -228,7 +229,7 @@ func (o *openWRT) removeRecord(ctx context.Context, index *sectionIndex, record 
 		index.drop(record.Key(), section)
 	}
 
-	logger.Log.Info("deleted record", recordFields(record)...)
+	o.log.Info("deleted record", recordFields(record)...)
 	return len(sections), nil
 }
 
@@ -242,7 +243,7 @@ func (o *openWRT) addRecord(ctx context.Context, index *sectionIndex, record DNS
 	key := record.Key()
 
 	if len(index.owned(key, o.ownershipID, o.ownershipEnabled())) > 0 {
-		logger.Log.Info("record already present, nothing to add", recordFields(record)...)
+		o.log.Info("record already present, nothing to add", recordFields(record)...)
 		return 0, nil
 	}
 
@@ -254,8 +255,8 @@ func (o *openWRT) addRecord(ctx context.Context, index *sectionIndex, record DNS
 				return 0, fmt.Errorf("adopt %s (%s): %w", record.DNSName(), section, err)
 			}
 			index.markOwned(key, section, o.ownershipID)
-			logger.Log.Info("adopted existing record",
-				append(recordFields(record), zap.String("section", section))...)
+			o.log.Info("adopted existing record",
+				append(recordFields(record), slog.String("section", section))...)
 			return 1, nil
 		}
 	}
@@ -266,7 +267,7 @@ func (o *openWRT) addRecord(ctx context.Context, index *sectionIndex, record DNS
 	}
 
 	index.add(key, section, o.ownershipID)
-	logger.Log.Info("added record", recordFields(record)...)
+	o.log.Info("added record", recordFields(record)...)
 	return 1, nil
 }
 
@@ -316,7 +317,7 @@ func (o *openWRT) setOwner(ctx context.Context, section string) error {
 func (o *openWRT) reload(ctx context.Context) error {
 	switch normaliseReloadStrategy(o.reloadStrategy) {
 	case ReloadStrategyNone:
-		logger.Log.Debug("reload disabled, dnsmasq keeps serving the previous configuration")
+		o.log.Debug("reload disabled, dnsmasq keeps serving the previous configuration")
 		return nil
 
 	case ReloadStrategyRestart:
@@ -351,14 +352,14 @@ func (o *openWRT) reload(ctx context.Context) error {
 		return fmt.Errorf("unknown reload strategy: %s", o.reloadStrategy)
 	}
 
-	logger.Log.Debug("reloaded dnsmasq", zap.String("strategy", o.reloadStrategy))
+	o.log.Debug("reloaded dnsmasq", slog.String("strategy", o.reloadStrategy))
 	return nil
 }
 
-func recordFields(record DNSRecord) []zap.Field {
-	return []zap.Field{
-		zap.String("name", record.DNSName()),
-		zap.String("type", record.Type),
-		zap.String("value", record.Value()),
+func recordFields(record DNSRecord) []any {
+	return []any{
+		slog.String("name", record.DNSName()),
+		slog.String("type", record.Type),
+		slog.String("value", record.Value()),
 	}
 }
