@@ -13,8 +13,9 @@ import (
 //go:generate mockgen -destination=../../internal/mocks/openwrt/openwrt.go -package=mocks . OpenWRT
 
 const (
-	dnsmasqReloadCommand = "/etc/init.d/dnsmasq reload"
-	uciConfig            = "dhcp"
+	dnsmasqRestartCommand = "/etc/init.d/dnsmasq restart"
+	dnsmasqReloadCommand  = "/etc/init.d/dnsmasq reload"
+	uciConfig             = "dhcp"
 )
 
 type OpenWRT interface {
@@ -309,13 +310,23 @@ func (o *openWRT) setOwner(ctx context.Context, section string) error {
 // /var/etc/dnsmasq.conf.* nor signals the daemon, so without this step records
 // stay invisible until something else restarts the service.
 func (o *openWRT) reload(ctx context.Context) error {
-	switch o.reloadStrategy {
+	switch normaliseReloadStrategy(o.reloadStrategy) {
 	case ReloadStrategyNone:
 		logger.Log.Debug("reload disabled, dnsmasq keeps serving the previous configuration")
 		return nil
 
-	case ReloadStrategyDnsmasq:
-		// Narrow by construction: touches dnsmasq and nothing else.
+	case ReloadStrategyRestart:
+		// The only strategy that applies both record types. A records go to
+		// the hostfile, which a reload could pick up, but CNAMEs are `--cname=`
+		// entries in the config file that dnsmasq reads once at startup.
+		if _, err := o.lucirpc.Sys(ctx, "call", []string{dnsmasqRestartCommand}); err != nil {
+			return fmt.Errorf("restart dnsmasq: %w", err)
+		}
+
+	case ReloadStrategyReload:
+		// Ineffective where dnsmasq runs under ujail: reload_service() signals
+		// the jail wrapper, not the daemon, so the regenerated files are never
+		// re-read. Never applies CNAMEs either. See config.go.
 		if _, err := o.lucirpc.Sys(ctx, "call", []string{dnsmasqReloadCommand}); err != nil {
 			return fmt.Errorf("reload dnsmasq: %w", err)
 		}
