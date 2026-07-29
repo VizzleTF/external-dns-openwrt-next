@@ -4,12 +4,9 @@ import (
 	"context"
 	"sort"
 
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/openwrt"
-	"go.uber.org/zap"
-	"sigs.k8s.io/external-dns/endpoint"
-	"sigs.k8s.io/external-dns/plan"
-	"sigs.k8s.io/external-dns/provider"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhookapi"
+	"log/slog"
 )
 
 // defaultTTL is what Records() reports for every record.
@@ -21,19 +18,19 @@ import (
 const defaultTTL = 300
 
 type Provider struct {
-	provider.BaseProvider
-
 	openwrt openwrt.OpenWRT
+	log     *slog.Logger
 }
 
-func New(cfg *Config) (*Provider, error) {
-	opwrt, err := openwrt.New(cfg.OpenWRT)
+func New(cfg *Config, log *slog.Logger) (*Provider, error) {
+	opwrt, err := openwrt.New(cfg.OpenWRT, log)
 	if err != nil {
 		return nil, err
 	}
 
 	return &Provider{
 		openwrt: opwrt,
+		log:     log,
 	}, nil
 }
 
@@ -43,22 +40,23 @@ func New(cfg *Config) (*Provider, error) {
 // as the pair (UpdateOld, UpdateNew) — the previous and the desired state of
 // the same records. Only UpdateNew must end up on the router; UpdateOld is
 // there to say what to withdraw.
-func (p *Provider) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
-	if changes == nil {
+func (p *Provider) ApplyChanges(ctx context.Context, changes *webhookapi.Changes) error {
+	if changes.Empty() {
+		p.log.Debug("empty change set")
 		return nil
 	}
 
-	logger.Log.Debug("apply changes",
-		zap.Int("create", len(changes.Create)),
-		zap.Int("update_old", len(changes.UpdateOld)),
-		zap.Int("update_new", len(changes.UpdateNew)),
-		zap.Int("delete", len(changes.Delete)))
+	p.log.Debug("apply changes",
+		slog.Int("create", len(changes.Create)),
+		slog.Int("update_old", len(changes.UpdateOld)),
+		slog.Int("update_new", len(changes.UpdateNew)),
+		slog.Int("delete", len(changes.Delete)))
 
-	remove := endpoints2DNSRecords(changes.Delete)
-	remove = append(remove, endpoints2DNSRecords(changes.UpdateOld)...)
+	remove := p.endpoints2DNSRecords(changes.Delete)
+	remove = append(remove, p.endpoints2DNSRecords(changes.UpdateOld)...)
 
-	add := endpoints2DNSRecords(changes.Create)
-	add = append(add, endpoints2DNSRecords(changes.UpdateNew)...)
+	add := p.endpoints2DNSRecords(changes.Create)
+	add = append(add, p.endpoints2DNSRecords(changes.UpdateNew)...)
 
 	// An update that only adds or drops a target leaves the untouched targets
 	// in both lists. Cancelling them out avoids deleting and immediately
@@ -66,7 +64,7 @@ func (p *Provider) ApplyChanges(ctx context.Context, changes *plan.Changes) erro
 	remove, add = cancelOut(remove, add)
 
 	if len(remove) == 0 && len(add) == 0 {
-		logger.Log.Debug("no effective changes")
+		p.log.Debug("no effective changes")
 		return nil
 	}
 
@@ -83,8 +81,8 @@ func (p *Provider) ApplyChanges(ctx context.Context, changes *plan.Changes) erro
 //   - record types other than A and CNAME cannot be written to UCI at all;
 //   - per-record TTLs do not exist in `domain`/`cname` sections, so an endpoint
 //     asking for one would never match what Records() reports.
-func (p *Provider) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*endpoint.Endpoint, error) {
-	adjusted := make([]*endpoint.Endpoint, 0, len(endpoints))
+func (p *Provider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) ([]*webhookapi.Endpoint, error) {
+	adjusted := make([]*webhookapi.Endpoint, 0, len(endpoints))
 
 	for _, ep := range endpoints {
 		if ep == nil {
@@ -92,16 +90,16 @@ func (p *Provider) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*endpoint.
 		}
 
 		switch ep.RecordType {
-		case endpoint.RecordTypeA, endpoint.RecordTypeCNAME:
+		case webhookapi.RecordTypeA, webhookapi.RecordTypeCNAME:
 		default:
-			logger.Log.Warn("dropping endpoint, record type not supported by this provider",
-				zap.String("name", ep.DNSName), zap.String("type", ep.RecordType))
+			p.log.Warn("dropping endpoint, record type not supported by this provider",
+				slog.String("name", ep.DNSName), slog.String("type", ep.RecordType))
 			continue
 		}
 
 		if ep.RecordTTL.IsConfigured() {
-			logger.Log.Debug("dropping per-record TTL, dnsmasq serves these from its global local_ttl",
-				zap.String("name", ep.DNSName), zap.Int64("ttl", int64(ep.RecordTTL)))
+			p.log.Debug("dropping per-record TTL, dnsmasq serves these from its global local_ttl",
+				slog.String("name", ep.DNSName), slog.Int64("ttl", int64(ep.RecordTTL)))
 			ep.RecordTTL = 0
 		}
 
@@ -111,13 +109,13 @@ func (p *Provider) AdjustEndpoints(endpoints []*endpoint.Endpoint) ([]*endpoint.
 	return adjusted, nil
 }
 
-func (p *Provider) Records(ctx context.Context) ([]*endpoint.Endpoint, error) {
+func (p *Provider) Records(ctx context.Context) ([]*webhookapi.Endpoint, error) {
 	records, err := p.openwrt.GetDNSRecords(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	return dnsRecords2Endpoints(records), nil
+	return p.dnsRecords2Endpoints(records), nil
 }
 
 // cancelOut drops entries present in both slices, preserving order.
@@ -157,7 +155,7 @@ func cancelOut(remove, add []openwrt.DNSRecord) ([]openwrt.DNSRecord, []openwrt.
 // several sections. Reporting them as separate endpoints with the same name
 // and type makes ExternalDNS plan a change on every run, so they are merged
 // back here.
-func dnsRecords2Endpoints(dnsRecords map[string]openwrt.DNSRecord) []*endpoint.Endpoint {
+func (p *Provider) dnsRecords2Endpoints(dnsRecords map[string]openwrt.DNSRecord) []*webhookapi.Endpoint {
 	type key struct {
 		name       string
 		recordType string
@@ -175,15 +173,15 @@ func dnsRecords2Endpoints(dnsRecords map[string]openwrt.DNSRecord) []*endpoint.E
 		grouped[k] = append(grouped[k], dnsRecord.Value())
 	}
 
-	endpoints := make([]*endpoint.Endpoint, 0, len(grouped))
+	endpoints := make([]*webhookapi.Endpoint, 0, len(grouped))
 	for k, targets := range grouped {
 		// Map iteration is random; sort so the output is stable across runs.
 		sort.Strings(targets)
-		endpoints = append(endpoints, &endpoint.Endpoint{
+		endpoints = append(endpoints, &webhookapi.Endpoint{
 			DNSName:    k.name,
 			RecordType: k.recordType,
 			RecordTTL:  defaultTTL,
-			Targets:    endpoint.Targets(targets),
+			Targets:    webhookapi.Targets(targets),
 		})
 	}
 
@@ -198,7 +196,7 @@ func dnsRecords2Endpoints(dnsRecords map[string]openwrt.DNSRecord) []*endpoint.E
 }
 
 // endpoints2DNSRecords flattens endpoints into one record per target.
-func endpoints2DNSRecords(endpoints []*endpoint.Endpoint) []openwrt.DNSRecord {
+func (p *Provider) endpoints2DNSRecords(endpoints []*webhookapi.Endpoint) []openwrt.DNSRecord {
 	var dnsRecords []openwrt.DNSRecord
 
 	for _, ep := range endpoints {
@@ -207,8 +205,8 @@ func endpoints2DNSRecords(endpoints []*endpoint.Endpoint) []openwrt.DNSRecord {
 		}
 
 		if len(ep.Targets) == 0 {
-			logger.Log.Warn("skipping endpoint without targets",
-				zap.String("name", ep.DNSName), zap.String("type", ep.RecordType))
+			p.log.Warn("skipping endpoint without targets",
+				slog.String("name", ep.DNSName), slog.String("type", ep.RecordType))
 			continue
 		}
 
@@ -216,17 +214,17 @@ func endpoints2DNSRecords(endpoints []*endpoint.Endpoint) []openwrt.DNSRecord {
 			var dnsRecord openwrt.DNSRecord
 
 			switch ep.RecordType {
-			case endpoint.RecordTypeA:
+			case webhookapi.RecordTypeA:
 				dnsRecord.Type = openwrt.RecordTypeA
 				dnsRecord.Name = ep.DNSName
 				dnsRecord.IP = target
-			case endpoint.RecordTypeCNAME:
+			case webhookapi.RecordTypeCNAME:
 				dnsRecord.Type = openwrt.RecordTypeCNAME
 				dnsRecord.CName = ep.DNSName
 				dnsRecord.Target = target
 			default:
-				logger.Log.Debug("skipping unsupported record type",
-					zap.String("name", ep.DNSName), zap.String("type", ep.RecordType))
+				p.log.Debug("skipping unsupported record type",
+					slog.String("name", ep.DNSName), slog.String("type", ep.RecordType))
 				continue
 			}
 
@@ -235,4 +233,11 @@ func endpoints2DNSRecords(endpoints []*endpoint.Endpoint) []openwrt.DNSRecord {
 	}
 
 	return dnsRecords
+}
+
+// GetDomainFilter reports no filter of its own: ExternalDNS applies the
+// --domain-filter it was started with, and this provider has no additional
+// knowledge of which zones the router should serve.
+func (p *Provider) GetDomainFilter() webhookapi.DomainFilter {
+	return webhookapi.DomainFilter{Filters: []string{}}
 }

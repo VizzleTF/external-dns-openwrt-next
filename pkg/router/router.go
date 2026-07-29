@@ -1,65 +1,56 @@
+// Package router serves the webhook over net/http.
+//
+// It used to run gin with a prometheus middleware. Four routes and a health
+// check do not need a framework, and nothing scraped the metrics endpoint, so
+// both are gone along with their dependency trees.
 package router
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
-
-	"github.com/Depado/ginprom"
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
-	ginzap "github.com/gin-contrib/zap"
-	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
 )
 
-const (
-	metrics_namespace     = "external_dns_openwrt_webhook"
-	metrics_gin_subsystem = "gin"
-	metrics_path          = "/metrics"
-)
+// Handler registers the application routes on a mux.
+type Handler interface {
+	Register(mux *http.ServeMux)
+}
 
 type Router struct {
 	config *Config
-	engine *gin.Engine
 	srv    *http.Server
+	log    *slog.Logger
 }
 
-func New(config *Config) (*Router, error) {
-	if config.Gin.ReleaseMode {
-		gin.SetMode(gin.ReleaseMode)
-	}
+// New builds the HTTP server. It cannot fail, so it returns no error.
+func New(config *Config, log *slog.Logger, handler Handler) *Router {
+	mux := http.NewServeMux()
 
-	r := gin.New()
-	r.Use(ginzap.GinzapWithConfig(logger.Log, &ginzap.Config{
-		TimeFormat: time.RFC3339,
-		UTC:        true,
-		SkipPaths:  []string{metrics_path, config.HealthCheckPath},
-	}))
-	r.Use(ginzap.RecoveryWithZap(logger.Log, true))
-
-	r.GET(config.HealthCheckPath, func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{})
+	mux.HandleFunc(config.HealthCheckPath, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{}"))
 	})
 
-	p := ginprom.New(
-		ginprom.Engine(r),
-		ginprom.Namespace(metrics_namespace),
-		ginprom.Subsystem(metrics_gin_subsystem),
-	)
-	r.Use(p.Instrument())
+	handler.Register(mux)
 
 	return &Router{
 		config: config,
-		engine: r,
+		log:    log,
 		srv: &http.Server{
 			Addr:    ":" + config.Port,
-			Handler: r,
+			Handler: logRequests(log, config.HealthCheckPath, mux),
+			// Bounds a client that opens a connection and never finishes
+			// sending the request headers.
+			ReadHeaderTimeout: 10 * time.Second,
 		},
-	}, nil
+	}
 }
 
 func (r *Router) Run() error {
-	logger.Log.Info("starting http server", zap.String("port", r.config.Port))
+	r.log.Info("starting http server", slog.String("port", r.config.Port))
+
 	if err := r.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return err
 	}
@@ -68,14 +59,44 @@ func (r *Router) Run() error {
 }
 
 func (r *Router) Shutdown(ctx context.Context) error {
-	logger.Log.Debug("shutting down http server")
+	r.log.Debug("shutting down http server")
+
 	if err := r.srv.Shutdown(ctx); err != nil {
 		return err
 	}
-	logger.Log.Info("http server stopped")
+
+	r.log.Info("http server stopped")
 	return nil
 }
 
-func (r *Router) GetEngine() *gin.Engine {
-	return r.engine
+// logRequests logs one line per request, skipping the health check so probes
+// do not flood the log.
+func logRequests(log *slog.Logger, healthPath string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == healthPath {
+			next.ServeHTTP(w, req)
+			return
+		}
+
+		start := time.Now()
+		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(recorder, req)
+
+		log.Info("request",
+			slog.String("method", req.Method),
+			slog.String("path", req.URL.Path),
+			slog.Int("status", recorder.status),
+			slog.Duration("duration", time.Since(start)))
+	})
+}
+
+// statusRecorder captures the status code for the access log.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(status int) {
+	r.status = status
+	r.ResponseWriter.WriteHeader(status)
 }

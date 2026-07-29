@@ -5,7 +5,7 @@ provider:
   webhook:
     image:
       repository: ghcr.io/vizzletf/external-dns-openwrt-webhook
-      tag: v0.5.0
+      tag: v0.6.0
     livenessProbe:
       httpGet:
         path: /ping
@@ -32,8 +32,6 @@ provider:
         value: /ping
       - name: ROUTER_HEALTHCHECK_PORT
         value: "8888"
-      - name: ROUTER_GIN_RELEASE_MODE
-        value: "true"
       # restart | reload | uci-apply | none — see README.
       # `reload` does nothing where dnsmasq runs under ujail, and never
       # applies CNAMEs; `restart` is the only strategy that applies both.

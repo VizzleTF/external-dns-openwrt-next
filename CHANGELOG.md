@@ -1,5 +1,52 @@
 # Changelog
 
+## v0.6.0
+
+Refactor pass. No behaviour change on the wire; the container just got a lot
+smaller and the code a lot less coupled.
+
+### Changed
+
+- **Dropped the `sigs.k8s.io/external-dns` dependency.** That module is the
+  controller, not a client SDK: importing its `endpoint`/`plan`/`provider`
+  packages pulled in `k8s.io/apimachinery` (for CRD types this webhook never
+  touches), klog, part of the AWS SDK and — from v0.21 — istio and contour.
+  The webhook contract is a documented JSON API pinned by the media type
+  `application/external.dns.webhook+json;version=1`, so the handful of wire
+  types now live in `pkg/webhookapi`, with tests that pin every JSON field name
+  against the upstream definitions.
+- **Dropped gin, ginprom and prometheus.** Four routes and a health check do
+  not need a framework, and nothing scraped the metrics endpoint. The HTTP
+  layer is `net/http` plus a `ServeMux`.
+- **Dropped viper and mapstructure.** Configuration only ever came from
+  environment variables, yet viper dragged in HCL, TOML, INI and properties
+  parsers plus a filesystem abstraction. `pkg/config` is now a small
+  reflection binder over the existing `mapstructure` tags, and the exact
+  variable names are pinned by a test.
+- **Dropped zap** in favour of `log/slog`.
+
+| | before | after |
+| --- | --- | --- |
+| binary | 30 MB | 9.5 MB |
+| modules in graph | 298 | 36 (all test-only) |
+| third-party packages linked | 232 | **0** |
+
+### Fixed
+
+- The logger swallowed an invalid `LOG_LEVEL` (`return nil` on a parse error)
+  and silently kept the first logger on a second call.
+- No timeout on the LuCI HTTP client: only the dial was bounded, so a router
+  that accepted a connection and then stalled would hang the request.
+- `errors.Is` instead of `==` for the auth sentinels, and a `>= 400` status
+  check instead of `> 226`.
+- `ShutodwnTimeout` typo, package-shadowing identifiers, and a shutdown path
+  that cancelled the context before waiting on it.
+
+### Removed
+
+- The `/metrics` endpoint and `ROUTER_GIN_RELEASE_MODE` (setting the latter is
+  now simply ignored).
+
 ## v0.5.0
 
 ### Fixed

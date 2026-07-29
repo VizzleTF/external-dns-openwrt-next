@@ -150,6 +150,21 @@ working local setup.
 | `PROVIDER_OPENWRT_OWNERSHIPID` | *(empty)* | See [Ownership](#ownership--required-before-policy-sync) |
 | `PROVIDER_OPENWRT_OWNERSHIPOPTION` | `external_dns` | UCI option holding the ownership ID |
 | `PROVIDER_OPENWRT_ADOPTEXISTING` | `true` | Adopt matching unmarked sections |
+| `ROUTER_PORT` | `8888` | Port the webhook listens on |
+| `ROUTER_HEALTHCHECK_PATH` | `/ping` | Liveness/readiness path |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
+| `LOG_ENCODING` | `json` | `json` or `console` |
+| `SHUTDOWN_TIMEOUT_SECONDS` | `5` | Graceful shutdown budget |
+
+## Dependencies
+
+The shipped binary links **no third-party packages** — only the Go standard
+library. The webhook contract types live in `pkg/webhookapi` rather than being
+imported from `sigs.k8s.io/external-dns`, which is the controller rather than a
+client SDK and would drag in Kubernetes apimachinery, klog and part of the AWS
+SDK for three structs. See [CHANGELOG.md](./CHANGELOG.md#v060).
+
+There is no `/metrics` endpoint.
 
 ## Supported records
 

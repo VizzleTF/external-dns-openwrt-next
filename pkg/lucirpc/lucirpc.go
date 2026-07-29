@@ -17,8 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
-	"go.uber.org/zap"
+	"log/slog"
 )
 
 const (
@@ -52,14 +51,15 @@ type Payload struct {
 }
 
 type Response struct {
-	ID     int         `json:"id"`
-	Result interface{} `json:"result"`
-	Error  interface{} `json:"error"`
+	ID     int `json:"id"`
+	Result any `json:"result"`
+	Error  any `json:"error"`
 }
 
 type lucirpc struct {
 	config     *Config
 	httpClient *http.Client
+	log        *slog.Logger
 
 	// ExternalDNS drives /records and /records concurrently with the health
 	// endpoint, and re-authentication rewrites the token, so guard it.
@@ -79,22 +79,28 @@ func (c *lucirpc) setToken(token string) {
 	c.token = token
 }
 
-func New(config *Config) (LuciRPC, error) {
+func New(config *Config, log *slog.Logger) (LuciRPC, error) {
+	timeout := time.Duration(config.Timeout) * time.Second
 	httpClient := &http.Client{
+		// The dial timeout alone only bounds connection setup. Without a
+		// client timeout a router that accepts the connection and then stalls
+		// would block the request until ExternalDNS gives up on its side.
+		Timeout: timeout,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: config.InsecureSkipVerify,
 			},
-			Dial: (&net.Dialer{
-				Timeout:   time.Duration(config.Timeout) * time.Second,
-				KeepAlive: time.Duration(config.Timeout) * time.Second,
-			}).Dial,
+			DialContext: (&net.Dialer{
+				Timeout:   timeout,
+				KeepAlive: timeout,
+			}).DialContext,
 		},
 	}
 
 	return &lucirpc{
 		config:     config,
 		httpClient: httpClient,
+		log:        log,
 	}, nil
 }
 
@@ -109,7 +115,7 @@ func (c *lucirpc) Sys(ctx context.Context, method string, params []string) (stri
 func (c *lucirpc) auth(ctx context.Context) error {
 	token, err := c.rpc(ctx, authPath, methodLogin, []string{c.config.Auth.Username, c.config.Auth.Password})
 	if err != nil {
-		logger.Log.Error("rpc: login fail", zap.Error(err))
+		c.log.Error("rpc: login fail", slog.Any("error", err))
 		return err
 	}
 
@@ -130,20 +136,20 @@ func (c *lucirpc) rpc(ctx context.Context, path, method string, params []string)
 		Params: params,
 	})
 	if err != nil {
-		logger.Log.Error("marshal fail", zap.Error(err))
+		c.log.Error("marshal fail", slog.Any("error", err))
 		return "", err
 	}
 
 	url := c.getUri(path, method)
 	respBody, err := c.call(ctx, url, data)
 	if err != nil {
-		logger.Log.Error("call fail", zap.Error(err))
+		c.log.Error("call fail", slog.Any("error", err))
 		return "", err
 	}
 
 	var response Response
 	if err := json.Unmarshal(respBody, &response); err != nil {
-		logger.Log.Error("unmarshal fail", zap.Error(err))
+		c.log.Error("unmarshal fail", slog.Any("error", err))
 		return "", err
 	}
 
@@ -160,7 +166,7 @@ func (c *lucirpc) rpc(ctx context.Context, path, method string, params []string)
 
 func (c *lucirpc) getUri(path, method string) string {
 	// The auth token is a credential — never log it.
-	logger.Log.Debug("uri", zap.String("path", path), zap.String("method", method))
+	c.log.Debug("uri", slog.String("path", path), slog.String("method", method))
 	proto := "https://"
 	if !c.config.SSL {
 		proto = "http://"
@@ -179,7 +185,7 @@ func (c *lucirpc) getUri(path, method string) string {
 func (c *lucirpc) call(ctx context.Context, url string, postBody []byte) ([]byte, error) {
 	// Neither the URL nor the body may be logged as-is: the URL carries
 	// ?auth=<session token> and a login body carries the router password.
-	logger.Log.Debug("call", zap.String("url", redactURL(url)))
+	c.log.Debug("call", slog.String("url", redactURL(url)))
 	body := bytes.NewReader(postBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
 	if err != nil {
@@ -193,9 +199,8 @@ func (c *lucirpc) call(ctx context.Context, url string, postBody []byte) ([]byte
 	}
 	defer resp.Body.Close()
 
-	var respBody []byte
-	respBody, err = io.ReadAll(resp.Body)
-	if resp.StatusCode > 226 {
+	respBody, err := io.ReadAll(resp.Body)
+	if resp.StatusCode >= http.StatusBadRequest {
 		return respBody, c.httpError(resp.StatusCode)
 	}
 
@@ -203,15 +208,14 @@ func (c *lucirpc) call(ctx context.Context, url string, postBody []byte) ([]byte
 }
 
 func (c *lucirpc) httpError(code int) error {
-	if code == 401 {
+	switch code {
+	case http.StatusUnauthorized:
 		return ErrHttpUnauthorized
-	}
-
-	if code == 403 {
+	case http.StatusForbidden:
 		return ErrHttpForbidden
+	default:
+		return fmt.Errorf("http status code: %d", code)
 	}
-
-	return fmt.Errorf("http status code: %d", code)
 }
 
 func (c *lucirpc) rpcWithAuth(ctx context.Context, path, method string, params []string) (string, error) {
@@ -220,11 +224,11 @@ func (c *lucirpc) rpcWithAuth(ctx context.Context, path, method string, params [
 		return result, nil
 	}
 
-	if err != ErrHttpUnauthorized && err != ErrHttpForbidden {
+	if !errors.Is(err, ErrHttpUnauthorized) && !errors.Is(err, ErrHttpForbidden) {
 		return "", err
 	}
 
-	logger.Log.Info("re-authenticate")
+	c.log.Info("re-authenticate")
 	if err = c.auth(ctx); err != nil {
 		return "", err
 	}
@@ -240,26 +244,26 @@ func redactURL(url string) string {
 	return url
 }
 
-func parseString(obj interface{}) (string, error) {
+// parseString renders an RPC result: strings pass through, anything else is
+// re-encoded as JSON so callers can unmarshal it themselves.
+func parseString(obj any) (string, error) {
 	if obj == nil {
 		return "", errors.New("nil object cannot be parsed")
 	}
 
-	var result string
-	if _, ok := obj.(string); ok {
-		result = fmt.Sprintf("%v", obj)
-		return result, nil
+	if str, ok := obj.(string); ok {
+		return str, nil
 	}
 
 	jsonBytes, err := json.Marshal(obj)
-	if err == nil {
-		result = string(jsonBytes)
+	if err != nil {
+		return "", err
 	}
 
-	return result, err
+	return string(jsonBytes), nil
 }
 
-func parseError(obj interface{}) error {
+func parseError(obj any) error {
 	result, err := parseString(obj)
 	if err != nil {
 		return err
