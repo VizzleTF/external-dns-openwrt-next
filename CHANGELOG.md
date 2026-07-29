@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.1
+
+### Removed
+
+- `logger.Config.StackTrace` and the `LOG_STACK_TRACE` variable. The field
+  configured zap's stacktrace behaviour; slog has no equivalent, so nothing
+  read it after v0.6.0.
+- The `ErrHttpUnauthenticated` sentinel, which was never returned nor compared
+  against.
+
+A `deadcode` pass over the binary reports nothing else unreachable.
+
 ## v0.6.0
 
 Refactor pass. No behaviour change on the wire; the container just got a lot
