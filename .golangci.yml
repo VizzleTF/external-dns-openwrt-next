@@ -1,0 +1,7 @@
+version: "2"
+
+# Formatting is part of the build, not a matter of taste: CI runs the same
+# linter binary, so a misformatted file fails there instead of drifting.
+formatters:
+  enable:
+    - gofmt

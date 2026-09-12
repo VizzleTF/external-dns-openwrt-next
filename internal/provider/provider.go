@@ -155,6 +155,13 @@ func cancelOut(remove, add []openwrt.DNSRecord) ([]openwrt.DNSRecord, []openwrt.
 // several sections. Reporting them as separate endpoints with the same name
 // and type makes ExternalDNS plan a change on every run, so they are merged
 // back here.
+//
+// Grouping is by canonical name, which matters for sections this provider did
+// not write: a `NAS.lan` adopted from LuCI and a `nas.lan` of its own are the
+// same record to ExternalDNS, and reporting them separately would lose one of
+// them. The plan keys a row on the normalised name and keeps only the last
+// endpoint it sees per record type, so the other section becomes invisible —
+// never updated, never deleted, and never noticed.
 func (p *Provider) dnsRecords2Endpoints(dnsRecords map[string]openwrt.DNSRecord) []*webhookapi.Endpoint {
 	type key struct {
 		name       string
@@ -169,7 +176,11 @@ func (p *Provider) dnsRecords2Endpoints(dnsRecords map[string]openwrt.DNSRecord)
 			continue
 		}
 
-		k := key{name: dnsRecord.DNSName(), recordType: dnsRecord.Type}
+		k := key{name: openwrt.CanonicalName(dnsRecord.DNSName()), recordType: dnsRecord.Type}
+		// Duplicate targets are reported as they are, not deduplicated: two
+		// sections saying the same thing is a change the plan should ask this
+		// provider to correct, and it does — the update deletes both and writes
+		// one back.
 		grouped[k] = append(grouped[k], dnsRecord.Value())
 	}
 
@@ -239,5 +250,5 @@ func (p *Provider) endpoints2DNSRecords(endpoints []*webhookapi.Endpoint) []open
 // --domain-filter it was started with, and this provider has no additional
 // knowledge of which zones the router should serve.
 func (p *Provider) GetDomainFilter() webhookapi.DomainFilter {
-	return webhookapi.DomainFilter{Filters: []string{}}
+	return webhookapi.DomainFilter{Include: []string{}, Exclude: []string{}}
 }

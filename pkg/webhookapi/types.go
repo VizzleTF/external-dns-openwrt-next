@@ -7,12 +7,13 @@
 // from v0.21, istio and contour — 429 linked packages and a 30 MB binary for
 // three structs.
 //
-// The contract itself is a stable, documented JSON API pinned by the media type
+// The contract itself is a stable JSON API pinned by the media type
 // `application/external.dns.webhook+json;version=1`, so mirroring it here costs
-// nothing in compatibility. Field names and JSON tags follow
-// kubernetes-sigs/external-dns `api/webhook.yaml` and the `endpoint`/`plan`
-// package definitions exactly — see types_test.go, which round-trips a payload
-// captured from a live ExternalDNS.
+// nothing in compatibility. Field names and JSON tags follow the
+// `endpoint`/`plan` package definitions, which are what the controller actually
+// encodes and decodes; `api/webhook.yaml` documents the same API but has drifted
+// from the code in places, and where the two disagree the code wins — see
+// DomainFilter below. types_test.go pins every field against the wire.
 package webhookapi
 
 // Record types. Only A and CNAME can be written to UCI; the rest are listed
@@ -60,13 +61,16 @@ type Endpoint struct {
 
 // Changes is one reconcile step.
 //
-// The field names are capitalised on the wire: `plan.Changes` in ExternalDNS
-// carries no JSON tags, so Go's default marshalling applies.
+// `plan.Changes` carries lower-camel JSON tags since ExternalDNS PR #5355
+// (`fix(webhook): api json object plan.Changes case`); before that it had no
+// tags at all and Go's default marshalling put `Create`/`UpdateOld`/… on the
+// wire. Both spellings decode into these fields — encoding/json matches keys
+// case-insensitively — so an older controller is still understood.
 type Changes struct {
-	Create    []*Endpoint `json:"Create,omitempty"`
-	UpdateOld []*Endpoint `json:"UpdateOld,omitempty"`
-	UpdateNew []*Endpoint `json:"UpdateNew,omitempty"`
-	Delete    []*Endpoint `json:"Delete,omitempty"`
+	Create    []*Endpoint `json:"create,omitempty"`
+	UpdateOld []*Endpoint `json:"updateOld,omitempty"`
+	UpdateNew []*Endpoint `json:"updateNew,omitempty"`
+	Delete    []*Endpoint `json:"delete,omitempty"`
 }
 
 // Empty reports whether the change set asks for nothing.
@@ -78,6 +82,18 @@ func (c *Changes) Empty() bool {
 }
 
 // DomainFilter is the negotiation response served from `GET /`.
+//
+// The wire format is the one ExternalDNS parses, not the one `api/webhook.yaml`
+// documents. That document still shows `{"filters": [...]}`, but the controller
+// decodes this body into `endpoint.DomainFilter`, whose UnmarshalJSON reads
+// `include`/`exclude` (or `regexInclude`/`regexExclude`) and knows no `filters`
+// key at all — a response using it is silently discarded and the controller
+// ends up with an empty filter. That has been the shape since v0.14, when the
+// webhook provider was introduced.
+//
+// The regex variant is deliberately not mirrored: this provider serves no
+// filter of its own, and the two forms are mutually exclusive upstream.
 type DomainFilter struct {
-	Filters []string `json:"filters"`
+	Include []string `json:"include"`
+	Exclude []string `json:"exclude"`
 }

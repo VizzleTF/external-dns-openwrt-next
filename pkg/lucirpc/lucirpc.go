@@ -196,7 +196,7 @@ func (c *lucirpc) call(ctx context.Context, url string, postBody []byte) ([]byte
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if resp.StatusCode >= http.StatusBadRequest {

@@ -1,23 +1,20 @@
 logLevel: info
 policy: sync
+# The default is A,AAAA,CNAME. This provider writes A and CNAME only, so an
+# AAAA endpoint — which any dual-stack Service produces — would be dropped and
+# warned about on every reconcile.
+extraArgs:
+  - --managed-record-types=A
+  - --managed-record-types=CNAME
 provider:
   name: webhook
   webhook:
     image:
-      repository: ghcr.io/vizzletf/external-dns-openwrt-webhook
-      tag: v0.6.0
-    livenessProbe:
-      httpGet:
-        path: /ping
-        port: 8888
-      initialDelaySeconds: 10
-      timeoutSeconds: 5
-    readinessProbe:
-      httpGet:
-        path: /ping
-        port: 8888
-      initialDelaySeconds: 10
-      timeoutSeconds: 5
+      repository: ghcr.io/vizzletf/external-dns-openwrt-next
+      tag: v0.7.0
+    # No probe overrides: the chart already probes /healthz on port 8080, which
+    # is where this webhook serves them. The provider API is on 8888, loopback
+    # only, and the kubelet could not reach it there anyway.
     # The following values are set to the default values
     env:
       - name: SHUTDOWN_TIMEOUT_SECONDS
@@ -26,10 +23,17 @@ provider:
         value: info
       - name: LOG_ENCODING
         value: json
-      - name: ROUTER_HEALTHCHECK_INTERVAL
-        value: /ping
-      - name: ROUTER_HEALTHCHECK_PORT
+      - name: ROUTER_ADDRESS
+        value: 127.0.0.1
+      - name: ROUTER_PORT
         value: "8888"
+      - name: ROUTER_HEALTHCHECK_PATH
+        value: /healthz
+      - name: ROUTER_HEALTHCHECK_PORT
+        value: "8080"
+      # Served on the healthcheck port. Empty disables the endpoint.
+      - name: ROUTER_METRICS_PATH
+        value: /metrics
       # restart | reload | uci-apply | none — see README.
       # `reload` does nothing where dnsmasq runs under ujail, and never
       # applies CNAMEs; `restart` is the only strategy that applies both.

@@ -5,12 +5,33 @@ import (
 	"testing"
 )
 
-// These payloads are the ExternalDNS wire format, taken from
-// kubernetes-sigs/external-dns `api/webhook.yaml` and the JSON tags on
+// These payloads are the ExternalDNS wire format, taken from the JSON tags on
 // `endpoint.Endpoint` / `plan.Changes`. They are the contract this package
 // mirrors, so a change in either direction has to fail here first.
 
+// changesPayload is what a current controller sends: `plan.Changes` gained
+// lower-camel JSON tags in ExternalDNS PR #5355.
 const changesPayload = `{
+  "create": [
+    {"dnsName":"new.example.com","targets":["1.2.3.4"],"recordType":"A","recordTTL":300}
+  ],
+  "updateOld": [
+    {"dnsName":"moved.example.com","targets":["1.1.1.1"],"recordType":"A"}
+  ],
+  "updateNew": [
+    {"dnsName":"moved.example.com","targets":["2.2.2.2"],"recordType":"A"}
+  ],
+  "delete": [
+    {"dnsName":"gone.example.com","targets":["9.9.9.9"],"recordType":"A",
+     "labels":{"owner":"default"},
+     "providerSpecific":[{"name":"webhook/foo","value":"bar"}],
+     "setIdentifier":"id-1"}
+  ]
+}`
+
+// legacyChangesPayload is what a controller older than that PR sends: no tags,
+// so Go's default marshalling capitalised every key.
+const legacyChangesPayload = `{
   "Create": [
     {"dnsName":"new.example.com","targets":["1.2.3.4"],"recordType":"A","recordTTL":300}
   ],
@@ -29,8 +50,26 @@ const changesPayload = `{
 }`
 
 func TestChangesDecodesTheExternalDNSPayload(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{"current", changesPayload},
+		{"pre-5355", legacyChangesPayload},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertChangesPayload(t, tc.payload)
+		})
+	}
+}
+
+// assertChangesPayload checks every field of the decoded change set, so both
+// key spellings are held to the same contract.
+func assertChangesPayload(t *testing.T, payload string) {
+	t.Helper()
+
 	var changes Changes
-	if err := json.Unmarshal([]byte(changesPayload), &changes); err != nil {
+	if err := json.Unmarshal([]byte(payload), &changes); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 
@@ -122,16 +161,26 @@ func TestUnsetTTLIsOmittedAndNotConfigured(t *testing.T) {
 	}
 }
 
-func TestDomainFilterAlwaysSerialisesFilters(t *testing.T) {
-	// The negotiation response must carry the key even when empty, otherwise
-	// ExternalDNS cannot deserialise the filter.
-	encoded, err := json.Marshal(DomainFilter{Filters: []string{}})
+func TestDomainFilterSerialisesIncludeAndExclude(t *testing.T) {
+	// ExternalDNS decodes this body into endpoint.DomainFilter, which reads
+	// `include`/`exclude`. A `filters` key — what api/webhook.yaml still shows —
+	// would be dropped on the floor.
+	encoded, err := json.Marshal(DomainFilter{Include: []string{}, Exclude: []string{}})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
 
-	if string(encoded) != `{"filters":[]}` {
-		t.Errorf("got %s, want {\"filters\":[]}", encoded)
+	if got, want := string(encoded), `{"include":[],"exclude":[]}`; got != want {
+		t.Errorf("got %s, want %s", got, want)
+	}
+
+	encoded, err = json.Marshal(DomainFilter{Include: []string{"example.com"}})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	if got, want := string(encoded), `{"include":["example.com"],"exclude":null}`; got != want {
+		t.Errorf("got %s, want %s", got, want)
 	}
 }
 

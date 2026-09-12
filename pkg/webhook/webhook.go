@@ -4,9 +4,12 @@ package webhook
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/metrics"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhookapi"
 )
 
@@ -16,6 +19,13 @@ const (
 	headerVary        = "Vary"
 
 	contentTypePlaintext = "text/plain"
+
+	// DefaultMaxBodyBytes mirrors the ExternalDNS default for
+	// --webhook-provider-max-body-size. The controller caps what it reads from
+	// this webhook; the cap here is the other half of that bargain, so a body
+	// that is never going to be a plausible change set cannot be streamed into
+	// memory before the decoder gives up.
+	DefaultMaxBodyBytes int64 = 32 << 20
 )
 
 // Provider is the behaviour this webhook needs from a DNS backend.
@@ -32,10 +42,46 @@ type Provider interface {
 type Webhook struct {
 	provider Provider
 	log      *slog.Logger
+	metrics  *webhookMetrics
+
+	// MaxBodyBytes caps a decoded request body. Zero or less disables the cap.
+	MaxBodyBytes int64
 }
 
-func New(provider Provider, log *slog.Logger) *Webhook {
-	return &Webhook{provider: provider, log: log}
+// webhookMetrics is what this layer can measure that the HTTP access log
+// cannot: how much state the router holds, what each reconcile asked for, and
+// how much of it this provider had to throw away.
+type webhookMetrics struct {
+	records     *metrics.Gauge
+	applied     *metrics.Counter
+	planned     *metrics.Counter
+	dropped     *metrics.Counter
+	lastSuccess *metrics.Gauge
+}
+
+func New(provider Provider, log *slog.Logger, registry *metrics.Registry) *Webhook {
+	return &Webhook{
+		provider:     provider,
+		log:          log,
+		metrics:      newWebhookMetrics(registry),
+		MaxBodyBytes: DefaultMaxBodyBytes,
+	}
+}
+
+func newWebhookMetrics(registry *metrics.Registry) *webhookMetrics {
+	return &webhookMetrics{
+		records: registry.Gauge(metrics.Prefix+"_records",
+			"DNS records the router reported to the last successful Records call."),
+		applied: registry.Counter(metrics.Prefix+"_apply_changes_total",
+			"Change sets applied, by outcome.", "result"),
+		planned: registry.Counter(metrics.Prefix+"_planned_endpoints_total",
+			"Endpoints ExternalDNS asked this provider to change, by action.", "action"),
+		dropped: registry.Counter(metrics.Prefix+"_dropped_endpoints_total",
+			"Endpoints dropped in AdjustEndpoints, by the record type UCI cannot represent.",
+			"record_type"),
+		lastSuccess: registry.Gauge(metrics.Prefix+"_last_apply_success_timestamp_seconds",
+			"Unix time of the last change set that reached the router."),
+	}
 }
 
 // Register wires the contract onto a mux. The routes are fixed by the
@@ -68,6 +114,7 @@ func (w *Webhook) Records(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	w.metrics.records.Set(float64(len(records)))
 	w.writeJSON(rw, http.StatusOK, records)
 }
 
@@ -89,11 +136,18 @@ func (w *Webhook) ApplyChanges(rw http.ResponseWriter, req *http.Request) {
 		slog.Int("update_new", len(changes.UpdateNew)),
 		slog.Int("delete", len(changes.Delete)))
 
+	w.metrics.planned.Add(float64(len(changes.Create)), "create")
+	w.metrics.planned.Add(float64(len(changes.UpdateNew)), "update")
+	w.metrics.planned.Add(float64(len(changes.Delete)), "delete")
+
 	if err := w.provider.ApplyChanges(req.Context(), &changes); err != nil {
+		w.metrics.applied.Inc("error")
 		w.fail(rw, "error applying changes", err)
 		return
 	}
 
+	w.metrics.applied.Inc("success")
+	w.metrics.lastSuccess.Set(float64(time.Now().Unix()))
 	rw.WriteHeader(http.StatusNoContent)
 }
 
@@ -114,8 +168,45 @@ func (w *Webhook) AdjustEndpoints(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// What the provider refused to represent — AAAA from a dual-stack Service,
+	// PTR, anything else UCI has no section for. Visible only in the log until
+	// now, and worth an alert when it starts climbing. Broken down by record
+	// type, because the answer ("narrow --managed-record-types", "turn off
+	// --create-ptr") depends on which one it is.
+	for recordType, count := range droppedByType(endpoints, adjusted) {
+		w.metrics.dropped.Add(float64(count), recordType)
+	}
+
 	w.log.Debug("adjusted endpoints", slog.Int("endpoints", len(adjusted)))
 	w.writeJSON(rw, http.StatusOK, adjusted)
+}
+
+// droppedByType counts, per record type, how many endpoints went in and did
+// not come back. The label set is the DNS record types, which is bounded, so
+// this cannot grow the metric without limit.
+func droppedByType(before, after []*webhookapi.Endpoint) map[string]int {
+	dropped := make(map[string]int)
+
+	for _, ep := range before {
+		if ep != nil {
+			dropped[ep.RecordType]++
+		}
+	}
+	for _, ep := range after {
+		if ep != nil {
+			dropped[ep.RecordType]--
+		}
+	}
+
+	for recordType, count := range dropped {
+		// An adjusted endpoint may also be one the provider rewrote rather than
+		// dropped, so only a positive difference counts.
+		if count <= 0 {
+			delete(dropped, recordType)
+		}
+	}
+
+	return dropped
 }
 
 // requireMediaType enforces the versioned media type on the given header,
@@ -140,7 +231,19 @@ func (w *Webhook) requireMediaType(rw http.ResponseWriter, req *http.Request, he
 func (w *Webhook) decode(rw http.ResponseWriter, req *http.Request, target any) bool {
 	defer func() { _ = req.Body.Close() }()
 
+	if w.MaxBodyBytes > 0 {
+		req.Body = http.MaxBytesReader(rw, req.Body, w.MaxBodyBytes)
+	}
+
 	if err := json.NewDecoder(req.Body).Decode(target); err != nil {
+		// An over-sized body is the client's fault and a distinct one: 413
+		// tells it the request will never fit, where 400 says it was malformed.
+		var toolarge *http.MaxBytesError
+		if errors.As(err, &toolarge) {
+			w.reject(rw, http.StatusRequestEntityTooLarge, "request body too large", "", "")
+			return false
+		}
+
 		w.log.Error("error decoding request body", slog.Any("error", err))
 		w.reject(rw, http.StatusBadRequest, "error decoding request body", "", "")
 		return false

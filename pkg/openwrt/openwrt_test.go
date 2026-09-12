@@ -181,6 +181,32 @@ var _ = Describe("OpenWRT", func() {
 			Expect(owning().ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")})).To(BeNil())
 		})
 
+		It("adopts a section whose name differs only in case or trailing dot", func() {
+			// ExternalDNS compares names canonically, dnsmasq answers them
+			// case-insensitively, and UCI stores whatever was typed into LuCI.
+			// Matching literally would add a duplicate for a name the router
+			// already serves.
+			expectGetAll(map[string]map[string]any{
+				"existing": domainSection("FOO.bar.com.", "1.1.1.1", ""),
+			})
+			mockLuciRPC.EXPECT().Uci(ctx, "set",
+				[]string{uciConfig, "existing", DefaultOwnershipOption, testOwner}).Return("", nil)
+			expectCommitAndReload()
+
+			Expect(owning().ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")})).To(BeNil())
+		})
+
+		It("writes the canonical spelling of a name", func() {
+			cfg := "cfg04"
+			expectGetAll(map[string]map[string]any{})
+			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{uciConfig, sectionTypeDomain}).Return(cfg, nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionName, "foo.bar.com"}).Return("", nil)
+			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionIP, "1.1.1.1"}).Return("", nil)
+			expectCommitAndReload()
+
+			Expect(unscoped().ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("FOO.Bar.com.", "1.1.1.1")})).To(BeNil())
+		})
+
 		It("does not adopt when adoption is switched off", func() {
 			cfg := "cfg03"
 			expectGetAll(map[string]map[string]any{
@@ -236,6 +262,19 @@ var _ = Describe("OpenWRT", func() {
 			expectCommitAndReload()
 
 			Expect(owning().ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)).To(BeNil())
+		})
+
+		It("deletes a record the change set spells differently", func() {
+			// A name whose case or trailing dot changed between what was
+			// written and what is asked for must still resolve to the same
+			// section, or the record would be stranded on the router forever.
+			expectGetAll(map[string]map[string]any{
+				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
+			})
+			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
+			expectCommitAndReload()
+
+			Expect(owning().ApplyDNSRecords(ctx, []DNSRecord{aRecord("Foo.BAR.com.", "1.1.1.1")}, nil)).To(BeNil())
 		})
 
 		It("refuses to delete a manually created record", func() {

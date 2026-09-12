@@ -11,6 +11,7 @@ import (
 	"github.com/VizzleTF/external-dns-openwrt-next/internal/provider"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/config"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/metrics"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/router"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhook"
 	"log/slog"
@@ -40,7 +41,10 @@ func run() error {
 		return fmt.Errorf("setup provider: %w", err)
 	}
 
-	srv := router.New(cfg.Router, log, webhook.New(dnsProvider, log))
+	registry := metrics.NewRegistry()
+	metrics.Build(registry)
+
+	srv := router.New(cfg.Router, log, registry, webhook.New(dnsProvider, log, registry))
 
 	// Buffered: a signal arriving before the receive must not be dropped.
 	serverErr := make(chan error, 1)

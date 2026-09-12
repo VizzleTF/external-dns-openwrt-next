@@ -91,6 +91,33 @@ var _ = Describe("Provider Suite", func() {
 			Expect([]string(endpoints[0].Targets)).To(Equal([]string{"1.1.1.1", "2.2.2.2"}))
 		})
 
+		It("merges sections whose names differ only in case or trailing dot", func() {
+			// ExternalDNS keys its plan on the normalised name and keeps one
+			// endpoint per record type, so reporting these separately would
+			// hide a section from it entirely: never updated, never deleted.
+			endpoints := newTestProvider().dnsRecords2Endpoints(map[string]openwrt.DNSRecord{
+				"adopted": {Type: openwrt.RecordTypeA, Name: "NAS.lan.", IP: "1.1.1.1"},
+				"ours":    {Type: openwrt.RecordTypeA, Name: "nas.lan", IP: "2.2.2.2"},
+			})
+
+			Expect(endpoints).To(HaveLen(1))
+			Expect(endpoints[0].DNSName).To(Equal("nas.lan"))
+			Expect([]string(endpoints[0].Targets)).To(Equal([]string{"1.1.1.1", "2.2.2.2"}))
+		})
+
+		It("reports duplicate sections as duplicate targets", func() {
+			// Not deduplicated on purpose: the plan then asks for an update,
+			// which deletes both sections and writes one back — the router ends
+			// up clean instead of quietly holding a copy forever.
+			endpoints := newTestProvider().dnsRecords2Endpoints(map[string]openwrt.DNSRecord{
+				"one": {Type: openwrt.RecordTypeA, Name: "dup.lan", IP: "1.1.1.1"},
+				"two": {Type: openwrt.RecordTypeA, Name: "DUP.lan", IP: "1.1.1.1"},
+			})
+
+			Expect(endpoints).To(HaveLen(1))
+			Expect([]string(endpoints[0].Targets)).To(Equal([]string{"1.1.1.1", "1.1.1.1"}))
+		})
+
 		It("returns endpoints in a stable order", func() {
 			records := map[string]openwrt.DNSRecord{
 				"a": {Type: openwrt.RecordTypeA, Name: "z.foobar.com", IP: "1.1.1.1"},

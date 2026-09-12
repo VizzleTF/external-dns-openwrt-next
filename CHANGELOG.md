@@ -1,5 +1,127 @@
 # Changelog
 
+## v0.7.0
+
+Catch-up with upstream ExternalDNS, which moved on while this fork was being
+refactored. Nothing here changes what lands on the router.
+
+### Fixed
+
+- **The negotiation response used a key ExternalDNS never reads.** `GET /`
+  answered `{"filters": []}`, the shape `api/webhook.yaml` documents. The
+  controller decodes that body into `endpoint.DomainFilter`, whose
+  `UnmarshalJSON` knows only `include`/`exclude` (or `regexInclude`/
+  `regexExclude`) — the `filters` key was silently discarded, and has been since
+  the webhook provider was introduced in v0.14. Harmless while this provider
+  serves an empty filter, and wrong the moment it serves anything else. The
+  response is now `{"include": [], "exclude": []}`.
+
+- **A section could be invisible to the plan.** `Records()` grouped sections by
+  the name UCI holds, so a `NAS.lan` adopted from LuCI and a `nas.lan` written
+  here were reported as two endpoints with the same name and type once
+  ExternalDNS normalised them. The plan keys a row on the normalised name and
+  keeps one endpoint per record type — the other section was silently dropped
+  from the plan, never updated and never deleted. Sections are now grouped
+  canonically, so both targets reach the controller as one endpoint.
+- **Names were matched byte for byte.** ExternalDNS compares DNS names
+  canonically — lower-cased and without the trailing dot, IDNA-aware since
+  v0.18 — while UCI stores whatever it was handed. A `NAS.lan` typed into LuCI
+  and an endpoint asking for `nas.lan` therefore looked like two different
+  records: adoption missed the existing section and wrote a second one for a
+  name dnsmasq already answered, and a change set spelling a name differently
+  from the router could neither update nor delete it. Record identity is now
+  canonical on both sides, and what is written to UCI is the canonical
+  spelling.
+- An unchecked `resp.Body.Close()` in the LuCI client, which the current
+  golangci-lint flags and CI pins to `latest`.
+
+### Changed
+
+- `webhookapi.Changes` now carries the lower-camel JSON tags upstream added in
+  external-dns PR #5355 (`create`, `updateOld`, `updateNew`, `delete`). Decoding
+  was never broken — `encoding/json` matches keys case-insensitively, so both
+  spellings land in the same fields — but the comment claiming `plan.Changes`
+  has no tags was three releases out of date. The contract test now pins both
+  the current payload and the pre-#5355 one.
+- **Two listeners, following the webhook provider specification.** The provider
+  API now binds to `127.0.0.1:8888` and the probes to `:8080`, instead of one
+  socket on `:8888` serving both. The API authenticates nobody and can rewrite
+  every record on the router, so it has no business on the pod IP; the kubelet
+  probes through that pod IP, which is why the health check is a second
+  listener rather than a path on the first. `ROUTER_ADDRESS` and
+  `ROUTER_HEALTHCHECK_PORT` configure them.
+
+  Probe overrides can be dropped from the values file — the chart's defaults
+  (`/healthz` on port 8080) now match. Deployments that probe `:8888` must
+  update, and anything reaching the API from outside the pod needs
+  `ROUTER_ADDRESS=0.0.0.0`.
+- Default `ROUTER_HEALTHCHECK_PATH` is `/healthz` instead of `/ping`, matching
+  the path the helm chart probes and the one the specification names.
+
+### Added
+
+- **A `/metrics` endpoint**, on the observability listener, in the Prometheus
+  text exposition format. The specification lists it as optional; what makes it
+  worth having here is that half of what this provider does was previously
+  visible only in the log — how many endpoints it dropped because UCI has no
+  section for them, when a change set last reached the router, how often the
+  router answered with an error.
+
+  Written by hand, in `pkg/metrics`: an atomic-backed registry and a renderer,
+  because prometheus/client_golang would be the only third-party code in a
+  binary that links none. Exposed series are `build_info`, `http_requests_total`,
+  `http_request_duration_seconds_total`, `records`, `planned_endpoints_total`,
+  `apply_changes_total`, `last_apply_success_timestamp_seconds` and
+  `dropped_endpoints_total{record_type}`, all under the `external_dns_openwrt`
+  prefix.
+  `ROUTER_METRICS_PATH` moves it; empty switches it off.
+- Request bodies are capped at 32 MiB, the ExternalDNS default for
+  `--webhook-provider-max-body-size`, and an over-sized one is answered with
+  413 rather than being streamed into memory and then failing as malformed
+  JSON. Upstream added the cap to both sides of the protocol in PR #6484.
+- `IdleTimeout` on the HTTP server, so a keep-alive connection nobody returns
+  to is eventually reaped.
+
+### Build and CI
+
+- Test dependencies updated: ginkgo v2.22.2 → v2.32.2, gomega v1.36.2 → v1.43.0,
+  uber mock v0.5.0 → v0.6.0. The go directive follows them to 1.25. The shipped
+  binary still links nothing outside the standard library — every module in the
+  graph is test-only.
+- GitHub Actions updated: checkout v4 → v7, setup-go v5 → v7 (now pinned to the
+  go directive via `go-version-file`), golangci-lint-action v6 → v9, setup-ko
+  v0.9 → v0.10, release-drafter v6 → v7.
+- golangci-lint is pinned to v2.13 rather than `latest`, which had started
+  failing CI on untouched code whenever a release enabled a new check.
+- A `.golangci.yml` enabling the gofmt formatter, so misformatted code fails CI
+  instead of drifting — the default linter set does not check formatting.
+- `.gitattributes` normalising line endings to LF, and a Dependabot config
+  grouping weekly go-module and action updates, so the next catch-up is a
+  review rather than an audit.
+
+### Docs
+
+- The example manifests dropped the `alpha` annotation prefix: v0.22.0 made
+  `external-dns.kubernetes.io/` the default with no fallback. README now spells
+  out which annotations reach this provider and what it does with each —
+  including `record-type: ptr`, new in v0.21/v0.22, whose records UCI cannot
+  write — and recommends narrowing `--managed-record-types` to `A,CNAME`, since
+  its default of `A,AAAA,CNAME` makes every dual-stack Service produce an
+  endpoint this provider drops.
+- `skaffold.yaml` pins chart 1.22.0 (ExternalDNS v0.22.0), and the example
+  values point at `ghcr.io/vizzletf/external-dns-openwrt-next` — they still
+  named the pre-fork image — at tag v0.6.1.
+- The example values set the four `ROUTER_*` variables that exist. They listed
+  `ROUTER_HEALTHCHECK_INTERVAL`, which never existed at all, and
+  `ROUTER_HEALTHCHECK_PORT`, which did not until this release.
+- The example values pass `--managed-record-types=A --managed-record-types=CNAME`.
+  The default is `A,AAAA,CNAME`, so every dual-stack Service produced an `AAAA`
+  endpoint this provider drops and warns about on each reconcile.
+- README documents `--registry=crd`, the CRD-based ownership registry added in
+  v0.22.0, as an alternative to the UCI marker: it reads current state from its
+  own `DNSRecord` objects instead of from the router, so `policy: sync` cannot
+  touch what it did not create.
+
 ## v0.6.1
 
 ### Removed

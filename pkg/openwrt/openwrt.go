@@ -275,6 +275,10 @@ func (o *openWRT) createSection(ctx context.Context, record DNSRecord) (string, 
 	var sectionType string
 	options := make([][2]string, 0, 3)
 
+	// What goes onto the router is the canonical spelling, so a later lookup
+	// finds it whatever case the annotation that asked for it used.
+	record = record.canonical()
+
 	switch record.Type {
 	case RecordTypeA:
 		sectionType = sectionTypeDomain

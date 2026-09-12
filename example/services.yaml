@@ -4,8 +4,8 @@ kind: Service
 metadata:
   name: dummy-cname
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: cname.foobar.io
-    external-dns.alpha.kubernetes.io/target: taget.foobar.io
+    external-dns.kubernetes.io/hostname: cname.foobar.io
+    external-dns.kubernetes.io/target: target.foobar.io
 spec:
   type: LoadBalancer
   ports:
@@ -21,7 +21,7 @@ kind: Service
 metadata:
   name: dummy-a
   annotations:
-    external-dns.alpha.kubernetes.io/hostname: a.foobar.io
+    external-dns.kubernetes.io/hostname: a.foobar.io
 spec:
   type: LoadBalancer
   ports:

@@ -10,12 +10,16 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-go@v5
-    - name: golangci
-      uses: golangci/golangci-lint-action@v6
+    - uses: actions/checkout@v7
+    - uses: actions/setup-go@v7
       with:
-        version: latest
+        go-version-file: go.mod
+    - name: golangci
+      uses: golangci/golangci-lint-action@v9
+      with:
+        # Pinned, not `latest`: a new linter release turning on a new check
+        # would otherwise fail CI on code nobody touched.
+        version: v2.13
 
     - name: vet
       run: go vet ./...
