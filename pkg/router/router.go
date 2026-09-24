@@ -34,7 +34,7 @@ func New(config *Config, log *slog.Logger, registry *metrics.Registry, register 
 	register(apiMux)
 
 	healthMux := http.NewServeMux()
-	healthMux.HandleFunc(config.HealthCheckPath, func(w http.ResponseWriter, _ *http.Request) {
+	healthMux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("{}"))
@@ -42,15 +42,13 @@ func New(config *Config, log *slog.Logger, registry *metrics.Registry, register 
 
 	// The specification puts /metrics beside /healthz, on the listener that is
 	// reachable from outside the pod: a scrape comes from Prometheus, not from
-	// the sidecar next door. An empty path switches it off.
-	if config.MetricsPath != "" {
-		healthMux.HandleFunc(config.MetricsPath, func(w http.ResponseWriter, _ *http.Request) {
-			w.Header().Set("Content-Type", metrics.ContentType)
-			if _, err := registry.WriteTo(w); err != nil {
-				log.Error("error writing metrics", slog.Any("error", err))
-			}
-		})
-	}
+	// the sidecar next door.
+	healthMux.HandleFunc("/metrics", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", metrics.ContentType)
+		if _, err := registry.WriteTo(w); err != nil {
+			log.Error("error writing metrics", slog.Any("error", err))
+		}
+	})
 
 	return &Router{
 		log: log,

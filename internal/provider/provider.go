@@ -104,33 +104,26 @@ func (p *Provider) Records(ctx context.Context) ([]*webhookapi.Endpoint, error) 
 
 // cancelOut drops entries present in both slices, preserving order.
 func cancelOut(remove, add []openwrt.DNSRecord) ([]openwrt.DNSRecord, []openwrt.DNSRecord) {
-	removeKeys := make(map[string]int, len(remove))
-	for _, record := range remove {
-		removeKeys[record.Key()]++
-	}
+	return without(remove, keys(add)), without(add, keys(remove))
+}
 
-	addKeys := make(map[string]int, len(add))
-	for _, record := range add {
-		addKeys[record.Key()]++
+func keys(records []openwrt.DNSRecord) map[string]bool {
+	set := make(map[string]bool, len(records))
+	for _, record := range records {
+		set[record.Key()] = true
 	}
+	return set
+}
 
-	keptRemove := make([]openwrt.DNSRecord, 0, len(remove))
-	for _, record := range remove {
-		if addKeys[record.Key()] > 0 {
-			continue
+// without returns records whose key is not in drop, preserving order.
+func without(records []openwrt.DNSRecord, drop map[string]bool) []openwrt.DNSRecord {
+	kept := make([]openwrt.DNSRecord, 0, len(records))
+	for _, record := range records {
+		if !drop[record.Key()] {
+			kept = append(kept, record)
 		}
-		keptRemove = append(keptRemove, record)
 	}
-
-	keptAdd := make([]openwrt.DNSRecord, 0, len(add))
-	for _, record := range add {
-		if removeKeys[record.Key()] > 0 {
-			continue
-		}
-		keptAdd = append(keptAdd, record)
-	}
-
-	return keptRemove, keptAdd
+	return kept
 }
 
 // dnsRecords2Endpoints groups UCI sections back into endpoints.
@@ -154,12 +147,6 @@ func (p *Provider) dnsRecords2Endpoints(dnsRecords map[string]openwrt.DNSRecord)
 
 	grouped := make(map[key][]string)
 	for _, dnsRecord := range dnsRecords {
-		switch dnsRecord.Type {
-		case openwrt.RecordTypeA, openwrt.RecordTypeCNAME:
-		default:
-			continue
-		}
-
 		k := key{name: openwrt.CanonicalName(dnsRecord.Name), recordType: dnsRecord.Type}
 		// Duplicate targets are reported as they are, not deduplicated: two
 		// sections saying the same thing is a change the plan should ask this
@@ -205,29 +192,17 @@ func (p *Provider) endpoints2DNSRecords(endpoints []*webhookapi.Endpoint) []open
 			continue
 		}
 
-		var recordType string
-		switch ep.RecordType {
-		case webhookapi.RecordTypeA:
-			recordType = openwrt.RecordTypeA
-		case webhookapi.RecordTypeCNAME:
-			recordType = openwrt.RecordTypeCNAME
-		default:
+		// Both packages spell the record types the same, "A" and "CNAME".
+		if ep.RecordType != webhookapi.RecordTypeA && ep.RecordType != webhookapi.RecordTypeCNAME {
 			p.log.Debug("skipping unsupported record type",
 				slog.String("name", ep.DNSName), slog.String("type", ep.RecordType))
 			continue
 		}
 
 		for _, target := range ep.Targets {
-			dnsRecords = append(dnsRecords, openwrt.DNSRecord{Type: recordType, Name: ep.DNSName, Value: target})
+			dnsRecords = append(dnsRecords, openwrt.DNSRecord{Type: ep.RecordType, Name: ep.DNSName, Value: target})
 		}
 	}
 
 	return dnsRecords
-}
-
-// GetDomainFilter reports no filter of its own: ExternalDNS applies the
-// --domain-filter it was started with, and this provider has no additional
-// knowledge of which zones the router should serve.
-func (p *Provider) GetDomainFilter() webhookapi.DomainFilter {
-	return webhookapi.DomainFilter{Include: []string{}, Exclude: []string{}}
 }

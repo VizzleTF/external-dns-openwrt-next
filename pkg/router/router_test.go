@@ -23,7 +23,7 @@ func TestMetricsAreServedOnTheObservabilityListener(t *testing.T) {
 	r := New(config, slog.New(slog.DiscardHandler), registry, fakeHandler)
 
 	res := httptest.NewRecorder()
-	r.health.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, config.MetricsPath, nil))
+	r.health.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 
 	if res.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200", res.Code)
@@ -38,22 +38,9 @@ func TestMetricsAreServedOnTheObservabilityListener(t *testing.T) {
 	// Scraping is not the sidecar's business, so the API listener does not
 	// serve it.
 	res = httptest.NewRecorder()
-	r.api.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, config.MetricsPath, nil))
+	r.api.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	if res.Code != http.StatusNotFound {
 		t.Errorf("metrics on the api listener: got %d, want 404", res.Code)
-	}
-}
-
-func TestAnEmptyMetricsPathSwitchesTheEndpointOff(t *testing.T) {
-	config := DefaultConfig()
-	config.MetricsPath = ""
-	r := New(config, slog.New(slog.DiscardHandler), metrics.NewRegistry(), fakeHandler)
-
-	res := httptest.NewRecorder()
-	r.health.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/metrics", nil))
-
-	if res.Code != http.StatusNotFound {
-		t.Errorf("status: got %d, want 404", res.Code)
 	}
 }
 
@@ -116,7 +103,7 @@ func TestHealthAnswersOnItsOwnListenerOnly(t *testing.T) {
 	r := New(config, slog.New(slog.DiscardHandler), metrics.NewRegistry(), fakeHandler)
 
 	res := httptest.NewRecorder()
-	r.health.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, config.HealthCheckPath, nil))
+	r.health.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 
 	if res.Code != http.StatusOK {
 		t.Fatalf("health status: got %d, want 200", res.Code)
@@ -128,7 +115,7 @@ func TestHealthAnswersOnItsOwnListenerOnly(t *testing.T) {
 	// The probe path is not served by the API listener, and the API routes are
 	// not served by the health listener.
 	res = httptest.NewRecorder()
-	r.api.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, config.HealthCheckPath, nil))
+	r.api.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if res.Code != http.StatusNotFound {
 		t.Errorf("health path on the api listener: got %d, want 404", res.Code)
 	}

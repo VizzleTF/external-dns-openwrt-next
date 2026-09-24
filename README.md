@@ -78,11 +78,13 @@ and it cannot be deleted. The marker is inert — `dhcp_domain_add` reads only
 `name`/`ip` and `dhcp_cname_add` only `cname`/`target`, so it never reaches the
 generated dnsmasq config.
 
+The marker lives in the `external_dns` UCI option. With ownership on, an
+unmarked section that already matches a record exactly is adopted — stamped
+with the marker — instead of getting a duplicate next to it.
+
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
 | `PROVIDER_OPENWRT_OWNERSHIPID` | *(empty)* | Marker value. **Empty disables ownership and every section is reported — do not combine that with `policy: sync`.** Give each ExternalDNS instance writing to the same router a distinct ID. |
-| `PROVIDER_OPENWRT_OWNERSHIPOPTION` | `external_dns` | UCI option holding the ID. |
-| `PROVIDER_OPENWRT_ADOPTEXISTING` | `true` | Take over an unmarked section that already matches the record exactly, instead of creating a duplicate. |
 
 ### Alternative: the CRD registry
 
@@ -132,7 +134,6 @@ Set with `PROVIDER_OPENWRT_RELOADSTRATEGY`:
 | Value | Behaviour |
 | ----- | --------- |
 | `restart` (default) | Runs `/etc/init.d/dnsmasq restart` over the `rpc/sys` endpoint. The only strategy that applies **both** record types. |
-| `reload` | Runs `/etc/init.d/dnsmasq reload`. **Verified ineffective where dnsmasq runs under ujail** (see below), and never applies CNAMEs. |
 | `uci-apply` | Calls `uci apply` with no arguments. Commits and applies **every** pending UCI config, not just `dhcp`, so anything an admin left staged is applied too. Use when the RPC user cannot reach `rpc/sys`. |
 | `none` | Commit only. Records land in `/etc/config/dhcp` but dnsmasq keeps serving the previous set. |
 
@@ -145,7 +146,7 @@ The two record types land in different places, and only one of them survives a r
 | `A` | hostfile `/tmp/hosts/dhcp.*` | `SIGHUP` re-reads hostfiles |
 | `CNAME` | `--cname=` in `/var/etc/dnsmasq.conf.*` | only a restart — dnsmasq reads its config file once, at startup |
 
-On top of that, `reload` was measured doing nothing at all on OpenWrt 25: dnsmasq
+On top of that, a reload was measured doing nothing at all on OpenWrt 25: dnsmasq
 runs inside **ujail**, `reload_service()` is
 `rc_procd start_service; procd_send_signal dnsmasq`, and the signal reaches the
 jail wrapper rather than the daemon. The regenerated hostfile contained the new
@@ -210,13 +211,9 @@ pod that is working correctly and would not bring the router back.
 | `PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME` / `_PASSWORD` | — | LuCI credentials |
 | `PROVIDER_OPENWRT_RELOADSTRATEGY` | `restart` | See [Reload strategy](#reload-strategy) |
 | `PROVIDER_OPENWRT_OWNERSHIPID` | *(empty)* | See [Ownership](#ownership--required-before-policy-sync) |
-| `PROVIDER_OPENWRT_OWNERSHIPOPTION` | `external_dns` | UCI option holding the ownership ID |
-| `PROVIDER_OPENWRT_ADOPTEXISTING` | `true` | Adopt matching unmarked sections |
 | `ROUTER_ADDRESS` | `127.0.0.1` | Address the provider API binds to |
 | `ROUTER_PORT` | `8888` | Port the provider API listens on |
-| `ROUTER_HEALTHCHECK_PATH` | `/healthz` | Liveness/readiness path |
-| `ROUTER_HEALTHCHECK_PORT` | `8080` | Port the probes and metrics listen on, on every interface |
-| `ROUTER_METRICS_PATH` | `/metrics` | Metrics path; empty disables the endpoint |
+| `ROUTER_HEALTHCHECK_PORT` | `8080` | Port `/healthz` and `/metrics` listen on, on every interface |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_ENCODING` | `json` | `json` or `console` |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `5` | Graceful shutdown budget |
@@ -234,8 +231,8 @@ written by hand for the same reason — see [Metrics](#metrics).
 
 ## Metrics
 
-`GET :8080/metrics`, in the Prometheus text exposition format. Set
-`ROUTER_METRICS_PATH=""` to switch it off; the chart can scrape it through
+`GET :8080/metrics`, in the Prometheus text exposition format; the chart can
+scrape it through
 `provider.webhook.serviceMonitor`.
 
 | Metric | Type | What it tells you |

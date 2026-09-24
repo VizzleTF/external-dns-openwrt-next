@@ -62,7 +62,7 @@ func section(sectionType, name, value, owner string) map[string]any {
 	}
 
 	if owner != "" {
-		options[DefaultOwnershipOption] = owner
+		options[ownershipOption] = owner
 	}
 
 	return options
@@ -79,12 +79,10 @@ func aRecord(name, ip string) DNSRecord {
 // owning builds a provider scoped to its own records, with adoption on.
 func owning(rpc *fakeRPC) *openWRT {
 	return &openWRT{
-		lucirpc:         rpc,
-		log:             slog.New(slog.DiscardHandler),
-		reloadStrategy:  ReloadStrategyRestart,
-		ownershipID:     testOwner,
-		ownershipOption: DefaultOwnershipOption,
-		adoptExisting:   true,
+		lucirpc:        rpc,
+		log:            slog.New(slog.DiscardHandler),
+		reloadStrategy: ReloadStrategyRestart,
+		ownershipID:    testOwner,
 	}
 }
 
@@ -92,7 +90,6 @@ func owning(rpc *fakeRPC) *openWRT {
 func unscoped(rpc *fakeRPC) *openWRT {
 	o := owning(rpc)
 	o.ownershipID = ""
-	o.adoptExisting = false
 	return o
 }
 
@@ -161,7 +158,7 @@ func TestReadingRecords(t *testing.T) {
 
 func TestAdding(t *testing.T) {
 	ctx := context.Background()
-	stamp := "uci set dhcp cfg01 " + DefaultOwnershipOption + " " + testOwner
+	stamp := "uci set dhcp cfg01 " + ownershipOption + " " + testOwner
 
 	for _, tc := range []struct {
 		name     string
@@ -198,7 +195,7 @@ func TestAdding(t *testing.T) {
 			sections: map[string]map[string]any{"existing": domainSection("foo.bar.com", "1.1.1.1", "")},
 			provider: owning,
 			add:      aRecord("foo.bar.com", "1.1.1.1"),
-			want:     []string{getAll, "uci set dhcp existing " + DefaultOwnershipOption + " " + testOwner, commit, restart},
+			want:     []string{getAll, "uci set dhcp existing " + ownershipOption + " " + testOwner, commit, restart},
 		},
 		{
 			// ExternalDNS compares names canonically, dnsmasq answers them
@@ -209,7 +206,7 @@ func TestAdding(t *testing.T) {
 			sections: map[string]map[string]any{"existing": domainSection("FOO.bar.com.", "1.1.1.1", "")},
 			provider: owning,
 			add:      aRecord("foo.bar.com", "1.1.1.1"),
-			want:     []string{getAll, "uci set dhcp existing " + DefaultOwnershipOption + " " + testOwner, commit, restart},
+			want:     []string{getAll, "uci set dhcp existing " + ownershipOption + " " + testOwner, commit, restart},
 		},
 		{
 			name:     "writes the canonical spelling of a name",
@@ -217,18 +214,6 @@ func TestAdding(t *testing.T) {
 			add:      aRecord("FOO.Bar.com.", "1.1.1.1"),
 			want: []string{getAll, "uci add dhcp domain",
 				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", commit, restart},
-		},
-		{
-			name:     "does not adopt when adoption is switched off",
-			sections: map[string]map[string]any{"existing": domainSection("foo.bar.com", "1.1.1.1", "")},
-			provider: func(rpc *fakeRPC) *openWRT {
-				o := owning(rpc)
-				o.adoptExisting = false
-				return o
-			},
-			add: aRecord("foo.bar.com", "1.1.1.1"),
-			want: []string{getAll, "uci add dhcp domain",
-				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", stamp, commit, restart},
 		},
 		{
 			name:     "never adopts a section owned by another instance",
@@ -366,7 +351,7 @@ func TestUpdatingRemovesAndAddsInASingleCommit(t *testing.T) {
 	}
 	assertCalls(t, rpc, getAll, "uci delete dhcp mine", "uci add dhcp domain",
 		"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 9.9.9.9",
-		"uci set dhcp cfg01 "+DefaultOwnershipOption+" "+testOwner, commit, restart)
+		"uci set dhcp cfg01 "+ownershipOption+" "+testOwner, commit, restart)
 }
 
 func TestReloadStrategies(t *testing.T) {
@@ -375,7 +360,6 @@ func TestReloadStrategies(t *testing.T) {
 		want     []string
 	}{
 		{ReloadStrategyNone, nil},
-		{ReloadStrategyReload, []string{"sys call " + dnsmasqReloadCommand}},
 		{ReloadStrategyRestart, []string{restart}},
 		// A config name here would be read as rollback=true and the change
 		// would revert itself after ~90s, so uci apply takes NO arguments.
@@ -414,30 +398,20 @@ func TestNothingToDoDoesNotEvenReadTheRouter(t *testing.T) {
 }
 
 func TestConfig(t *testing.T) {
-	for _, strategy := range []string{ReloadStrategyRestart, ReloadStrategyReload, ReloadStrategyUciApply, ReloadStrategyNone} {
+	for _, strategy := range []string{ReloadStrategyRestart, ReloadStrategyUciApply, ReloadStrategyNone} {
 		if err := validateReloadStrategy(strategy); err != nil {
 			t.Errorf("%s: %v", strategy, err)
 		}
 	}
-	// "dnsmasq", the old name of reload, is no longer accepted.
-	for _, strategy := range []string{"dnsmasq", "nope"} {
+	// "reload" and its old name "dnsmasq" are gone: neither applied CNAMEs.
+	for _, strategy := range []string{"reload", "dnsmasq", "nope"} {
 		if validateReloadStrategy(strategy) == nil {
 			t.Errorf("%s: accepted", strategy)
 		}
 	}
 
-	for option, valid := range map[string]bool{
-		"external_dns": true, "externalDns2": true,
-		"external-dns": false, "external dns": false, "": false,
-	} {
-		if err := validateOwnershipOption(option); (err == nil) != valid {
-			t.Errorf("ownership option %q: got %v", option, err)
-		}
-	}
-
 	cfg := DefaultConfig()
-	if cfg.OwnershipID != "" || cfg.OwnershipOption != DefaultOwnershipOption ||
-		!cfg.AdoptExisting || cfg.ReloadStrategy != ReloadStrategyRestart {
+	if cfg.OwnershipID != "" || cfg.ReloadStrategy != ReloadStrategyRestart {
 		t.Errorf("defaults: got %+v", cfg)
 	}
 }
