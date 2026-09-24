@@ -2,251 +2,230 @@ package provider
 
 import (
 	"context"
+	"log/slog"
+	"reflect"
 	"testing"
 
-	mocks "github.com/VizzleTF/external-dns-openwrt-next/internal/mocks/openwrt"
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/openwrt"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhookapi"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"go.uber.org/mock/gomock"
 )
 
-func TestProvider(t *testing.T) {
-	RegisterFailHandler(Fail)
-	RunSpecs(t, "Provider Suite")
-	defer GinkgoRecover()
+// fakeOpenWRT serves a fixed router state and records what it was asked to
+// apply.
+type fakeOpenWRT struct {
+	records     map[string]openwrt.DNSRecord
+	remove, add []openwrt.DNSRecord
 }
 
-// newTestProvider builds a provider for the pure-conversion helpers, which
-// never touch the router.
-func newTestProvider() *Provider {
-	return &Provider{log: logger.Discard()}
+func (f *fakeOpenWRT) GetDNSRecords(context.Context) (map[string]openwrt.DNSRecord, error) {
+	return f.records, nil
 }
 
-var _ = Describe("Provider Suite", func() {
-	var (
-		ctx         context.Context
-		mockCtrl    *gomock.Controller
-		mockOpenWRT *mocks.MockOpenWRT
-	)
+func (f *fakeOpenWRT) ApplyDNSRecords(_ context.Context, remove, add []openwrt.DNSRecord) error {
+	f.remove, f.add = remove, add
+	return nil
+}
 
-	BeforeEach(func() {
-		ctx = context.Background()
-		mockCtrl = gomock.NewController(GinkgoT())
-		mockOpenWRT = mocks.NewMockOpenWRT(mockCtrl)
-	})
+func newTestProvider(router *fakeOpenWRT) *Provider {
+	return &Provider{openwrt: router, log: slog.New(slog.DiscardHandler)}
+}
 
-	AfterEach(func() {
-		mockCtrl.Finish()
-	})
+func a(name, ip string) openwrt.DNSRecord {
+	return openwrt.DNSRecord{Type: openwrt.RecordTypeA, Name: name, Value: ip}
+}
 
-	Context("endpoints to dns records", func() {
-		It("converts A and CNAME", func() {
-			dnsRecords := newTestProvider().endpoints2DNSRecords([]*webhookapi.Endpoint{
-				{DNSName: "a.foobar.com", RecordType: webhookapi.RecordTypeA, Targets: []string{"1.1.1.1"}},
-				{DNSName: "b.foobar.com", RecordType: webhookapi.RecordTypeCNAME, Targets: []string{"c.foobar.com"}},
-			})
+func endpoint(name, recordType string, targets ...string) *webhookapi.Endpoint {
+	return &webhookapi.Endpoint{DNSName: name, RecordType: recordType, Targets: targets}
+}
 
-			Expect(dnsRecords).To(Equal([]openwrt.DNSRecord{
-				{Type: openwrt.RecordTypeA, Name: "a.foobar.com", IP: "1.1.1.1"},
-				{Type: openwrt.RecordTypeCNAME, CName: "b.foobar.com", Target: "c.foobar.com"},
-			}))
-		})
-
-		It("emits one record per target", func() {
+func TestEndpointsToDNSRecords(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		endpoints []*webhookapi.Endpoint
+		want      []openwrt.DNSRecord
+	}{
+		{
+			name: "converts A and CNAME",
+			endpoints: []*webhookapi.Endpoint{
+				endpoint("a.foobar.com", webhookapi.RecordTypeA, "1.1.1.1"),
+				endpoint("b.foobar.com", webhookapi.RecordTypeCNAME, "c.foobar.com"),
+			},
+			want: []openwrt.DNSRecord{
+				a("a.foobar.com", "1.1.1.1"),
+				{Type: openwrt.RecordTypeCNAME, Name: "b.foobar.com", Value: "c.foobar.com"},
+			},
+		},
+		{
 			// Upstream only ever read Targets[0], silently dropping the rest.
-			dnsRecords := newTestProvider().endpoints2DNSRecords([]*webhookapi.Endpoint{
-				{DNSName: "multi.foobar.com", RecordType: webhookapi.RecordTypeA, Targets: []string{"1.1.1.1", "2.2.2.2"}},
-			})
-
-			Expect(dnsRecords).To(Equal([]openwrt.DNSRecord{
-				{Type: openwrt.RecordTypeA, Name: "multi.foobar.com", IP: "1.1.1.1"},
-				{Type: openwrt.RecordTypeA, Name: "multi.foobar.com", IP: "2.2.2.2"},
-			}))
+			name:      "emits one record per target",
+			endpoints: []*webhookapi.Endpoint{endpoint("multi.foobar.com", webhookapi.RecordTypeA, "1.1.1.1", "2.2.2.2")},
+			want:      []openwrt.DNSRecord{a("multi.foobar.com", "1.1.1.1"), a("multi.foobar.com", "2.2.2.2")},
+		},
+		{
+			name: "skips unsupported types and empty targets",
+			endpoints: []*webhookapi.Endpoint{
+				endpoint("txt.foobar.com", "TXT", "hello"),
+				endpoint("empty.foobar.com", webhookapi.RecordTypeA),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := newTestProvider(nil).endpoints2DNSRecords(tc.endpoints); !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
 		})
+	}
+}
 
-		It("skips unsupported types and empty targets", func() {
-			dnsRecords := newTestProvider().endpoints2DNSRecords([]*webhookapi.Endpoint{
-				{DNSName: "txt.foobar.com", RecordType: webhookapi.RecordTypeTXT, Targets: []string{"hello"}},
-				{DNSName: "empty.foobar.com", RecordType: webhookapi.RecordTypeA},
-			})
-
-			Expect(dnsRecords).To(BeEmpty())
-		})
-	})
-
-	Context("dns records to endpoints", func() {
-		It("merges sections that share a name and type into one endpoint", func() {
-			endpoints := newTestProvider().dnsRecords2Endpoints(map[string]openwrt.DNSRecord{
-				"a": {Type: openwrt.RecordTypeA, Name: "multi.foobar.com", IP: "2.2.2.2"},
-				"b": {Type: openwrt.RecordTypeA, Name: "multi.foobar.com", IP: "1.1.1.1"},
-			})
-
-			Expect(endpoints).To(HaveLen(1))
-			Expect(endpoints[0].DNSName).To(Equal("multi.foobar.com"))
-			Expect(endpoints[0].RecordType).To(Equal(webhookapi.RecordTypeA))
+func TestDNSRecordsToEndpoints(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		records map[string]openwrt.DNSRecord
+		want    []*webhookapi.Endpoint
+	}{
+		{
 			// Sorted, so the plan does not churn on random map order.
-			Expect([]string(endpoints[0].Targets)).To(Equal([]string{"1.1.1.1", "2.2.2.2"}))
-		})
-
-		It("merges sections whose names differ only in case or trailing dot", func() {
+			name: "merges sections that share a name and type into one endpoint",
+			records: map[string]openwrt.DNSRecord{
+				"a": a("multi.foobar.com", "2.2.2.2"),
+				"b": a("multi.foobar.com", "1.1.1.1"),
+			},
+			want: []*webhookapi.Endpoint{endpoint("multi.foobar.com", webhookapi.RecordTypeA, "1.1.1.1", "2.2.2.2")},
+		},
+		{
 			// ExternalDNS keys its plan on the normalised name and keeps one
 			// endpoint per record type, so reporting these separately would
 			// hide a section from it entirely: never updated, never deleted.
-			endpoints := newTestProvider().dnsRecords2Endpoints(map[string]openwrt.DNSRecord{
-				"adopted": {Type: openwrt.RecordTypeA, Name: "NAS.lan.", IP: "1.1.1.1"},
-				"ours":    {Type: openwrt.RecordTypeA, Name: "nas.lan", IP: "2.2.2.2"},
-			})
-
-			Expect(endpoints).To(HaveLen(1))
-			Expect(endpoints[0].DNSName).To(Equal("nas.lan"))
-			Expect([]string(endpoints[0].Targets)).To(Equal([]string{"1.1.1.1", "2.2.2.2"}))
-		})
-
-		It("reports duplicate sections as duplicate targets", func() {
+			name: "merges sections whose names differ only in case or trailing dot",
+			records: map[string]openwrt.DNSRecord{
+				"adopted": a("NAS.lan.", "1.1.1.1"),
+				"ours":    a("nas.lan", "2.2.2.2"),
+			},
+			want: []*webhookapi.Endpoint{endpoint("nas.lan", webhookapi.RecordTypeA, "1.1.1.1", "2.2.2.2")},
+		},
+		{
 			// Not deduplicated on purpose: the plan then asks for an update,
 			// which deletes both sections and writes one back — the router ends
 			// up clean instead of quietly holding a copy forever.
-			endpoints := newTestProvider().dnsRecords2Endpoints(map[string]openwrt.DNSRecord{
-				"one": {Type: openwrt.RecordTypeA, Name: "dup.lan", IP: "1.1.1.1"},
-				"two": {Type: openwrt.RecordTypeA, Name: "DUP.lan", IP: "1.1.1.1"},
-			})
-
-			Expect(endpoints).To(HaveLen(1))
-			Expect([]string(endpoints[0].Targets)).To(Equal([]string{"1.1.1.1", "1.1.1.1"}))
-		})
-
-		It("returns endpoints in a stable order", func() {
-			records := map[string]openwrt.DNSRecord{
-				"a": {Type: openwrt.RecordTypeA, Name: "z.foobar.com", IP: "1.1.1.1"},
-				"b": {Type: openwrt.RecordTypeCNAME, CName: "a.foobar.com", Target: "z.foobar.com"},
+			name: "reports duplicate sections as duplicate targets",
+			records: map[string]openwrt.DNSRecord{
+				"one": a("dup.lan", "1.1.1.1"),
+				"two": a("DUP.lan", "1.1.1.1"),
+			},
+			want: []*webhookapi.Endpoint{endpoint("dup.lan", webhookapi.RecordTypeA, "1.1.1.1", "1.1.1.1")},
+		},
+		{
+			name: "returns endpoints in a stable order",
+			records: map[string]openwrt.DNSRecord{
+				"a": a("z.foobar.com", "1.1.1.1"),
+				"b": {Type: openwrt.RecordTypeCNAME, Name: "a.foobar.com", Value: "z.foobar.com"},
+			},
+			want: []*webhookapi.Endpoint{
+				endpoint("a.foobar.com", webhookapi.RecordTypeCNAME, "z.foobar.com"),
+				endpoint("z.foobar.com", webhookapi.RecordTypeA, "1.1.1.1"),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, ep := range tc.want {
+				ep.RecordTTL = defaultTTL
 			}
-
-			first := newTestProvider().dnsRecords2Endpoints(records)
-			for i := 0; i < 10; i++ {
-				Expect(newTestProvider().dnsRecords2Endpoints(records)).To(Equal(first))
+			for range 10 {
+				if got := newTestProvider(nil).dnsRecords2Endpoints(tc.records); !reflect.DeepEqual(got, tc.want) {
+					t.Fatalf("got %v, want %v", got, tc.want)
+				}
 			}
-			Expect(first[0].DNSName).To(Equal("a.foobar.com"))
-			Expect(first[1].DNSName).To(Equal("z.foobar.com"))
 		})
-	})
+	}
+}
 
-	Context("apply changes", func() {
-		It("applies creates and deletes", func() {
-			mockOpenWRT.EXPECT().ApplyDNSRecords(ctx,
-				[]openwrt.DNSRecord{{Type: openwrt.RecordTypeA, Name: "old.foobar.com", IP: "9.9.9.9"}},
-				[]openwrt.DNSRecord{{Type: openwrt.RecordTypeA, Name: "new.foobar.com", IP: "1.1.1.1"}},
-			).Return(nil)
-
-			p := &Provider{openwrt: mockOpenWRT, log: logger.Discard()}
-			err := p.ApplyChanges(ctx, &webhookapi.Changes{
-				Create: []*webhookapi.Endpoint{
-					{DNSName: "new.foobar.com", RecordType: webhookapi.RecordTypeA, Targets: []string{"1.1.1.1"}},
-				},
-				Delete: []*webhookapi.Endpoint{
-					{DNSName: "old.foobar.com", RecordType: webhookapi.RecordTypeA, Targets: []string{"9.9.9.9"}},
-				},
-			})
-			Expect(err).To(BeNil())
-		})
-
-		It("withdraws UpdateOld and installs UpdateNew", func() {
+func TestApplyChanges(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		changes     webhookapi.Changes
+		remove, add []openwrt.DNSRecord
+	}{
+		{
+			name: "applies creates and deletes",
+			changes: webhookapi.Changes{
+				Create: []*webhookapi.Endpoint{endpoint("new.foobar.com", webhookapi.RecordTypeA, "1.1.1.1")},
+				Delete: []*webhookapi.Endpoint{endpoint("old.foobar.com", webhookapi.RecordTypeA, "9.9.9.9")},
+			},
+			remove: []openwrt.DNSRecord{a("old.foobar.com", "9.9.9.9")},
+			add:    []openwrt.DNSRecord{a("new.foobar.com", "1.1.1.1")},
+		},
+		{
 			// Upstream pushed UpdateOld back onto the router before UpdateNew,
 			// so the previous value was re-created on every update.
-			mockOpenWRT.EXPECT().ApplyDNSRecords(ctx,
-				[]openwrt.DNSRecord{{Type: openwrt.RecordTypeA, Name: "foo.foobar.com", IP: "1.1.1.1"}},
-				[]openwrt.DNSRecord{{Type: openwrt.RecordTypeA, Name: "foo.foobar.com", IP: "2.2.2.2"}},
-			).Return(nil)
-
-			p := &Provider{openwrt: mockOpenWRT, log: logger.Discard()}
-			err := p.ApplyChanges(ctx, &webhookapi.Changes{
-				UpdateOld: []*webhookapi.Endpoint{
-					{DNSName: "foo.foobar.com", RecordType: webhookapi.RecordTypeA, Targets: []string{"1.1.1.1"}},
-				},
-				UpdateNew: []*webhookapi.Endpoint{
-					{DNSName: "foo.foobar.com", RecordType: webhookapi.RecordTypeA, Targets: []string{"2.2.2.2"}},
-				},
-			})
-			Expect(err).To(BeNil())
+			name: "withdraws UpdateOld and installs UpdateNew",
+			changes: webhookapi.Changes{
+				UpdateOld: []*webhookapi.Endpoint{endpoint("foo.foobar.com", webhookapi.RecordTypeA, "1.1.1.1")},
+				UpdateNew: []*webhookapi.Endpoint{endpoint("foo.foobar.com", webhookapi.RecordTypeA, "2.2.2.2")},
+			},
+			remove: []openwrt.DNSRecord{a("foo.foobar.com", "1.1.1.1")},
+			add:    []openwrt.DNSRecord{a("foo.foobar.com", "2.2.2.2")},
+		},
+		{
+			name: "leaves untouched targets alone when an update only adds one",
+			changes: webhookapi.Changes{
+				UpdateOld: []*webhookapi.Endpoint{endpoint("foo.foobar.com", webhookapi.RecordTypeA, "1.1.1.1")},
+				UpdateNew: []*webhookapi.Endpoint{endpoint("foo.foobar.com", webhookapi.RecordTypeA, "1.1.1.1", "2.2.2.2")},
+			},
+			remove: []openwrt.DNSRecord{},
+			add:    []openwrt.DNSRecord{a("foo.foobar.com", "2.2.2.2")},
+		},
+		{
+			// The router layer skips the round trip for an empty pair.
+			name:   "passes an empty plan through as nothing to do",
+			remove: []openwrt.DNSRecord{},
+			add:    []openwrt.DNSRecord{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			router := &fakeOpenWRT{}
+			if err := newTestProvider(router).ApplyChanges(context.Background(), &tc.changes); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(router.remove, tc.remove) || !reflect.DeepEqual(router.add, tc.add) {
+				t.Errorf("got remove %v add %v, want remove %v add %v", router.remove, router.add, tc.remove, tc.add)
+			}
 		})
+	}
+}
 
-		It("leaves untouched targets alone when an update only adds one", func() {
-			mockOpenWRT.EXPECT().ApplyDNSRecords(ctx,
-				[]openwrt.DNSRecord{},
-				[]openwrt.DNSRecord{{Type: openwrt.RecordTypeA, Name: "foo.foobar.com", IP: "2.2.2.2"}},
-			).Return(nil)
+func TestAdjustEndpoints(t *testing.T) {
+	p := newTestProvider(nil)
 
-			p := &Provider{openwrt: mockOpenWRT, log: logger.Discard()}
-			err := p.ApplyChanges(ctx, &webhookapi.Changes{
-				UpdateOld: []*webhookapi.Endpoint{
-					{DNSName: "foo.foobar.com", RecordType: webhookapi.RecordTypeA, Targets: []string{"1.1.1.1"}},
-				},
-				UpdateNew: []*webhookapi.Endpoint{
-					{DNSName: "foo.foobar.com", RecordType: webhookapi.RecordTypeA, Targets: []string{"1.1.1.1", "2.2.2.2"}},
-				},
-			})
-			Expect(err).To(BeNil())
-		})
-
-		It("does not touch the router when the plan is a no-op", func() {
-			p := &Provider{openwrt: mockOpenWRT, log: logger.Discard()}
-			Expect(p.ApplyChanges(ctx, &webhookapi.Changes{})).To(BeNil())
-			Expect(p.ApplyChanges(ctx, nil)).To(BeNil())
-		})
+	// Left in place they would be planned, silently skipped at write time, and
+	// re-planned on every run.
+	adjusted := p.AdjustEndpoints([]*webhookapi.Endpoint{
+		endpoint("a.foobar.com", webhookapi.RecordTypeA, "1.1.1.1"),
+		endpoint("aaaa.foobar.com", "AAAA", "::1"),
+		endpoint("txt.foobar.com", "TXT", "hi"),
+		endpoint("c.foobar.com", webhookapi.RecordTypeCNAME, "a.foobar.com"),
+		nil,
 	})
+	if len(adjusted) != 2 || adjusted[0].DNSName != "a.foobar.com" || adjusted[1].DNSName != "c.foobar.com" {
+		t.Errorf("unsupported types kept: %v", adjusted)
+	}
 
-	Context("adjust endpoints", func() {
-		It("drops record types this provider cannot write", func() {
-			// Left in place they would be planned, silently skipped at write
-			// time, and re-planned on every run.
-			p := &Provider{openwrt: mockOpenWRT, log: logger.Discard()}
-			adjusted, err := p.AdjustEndpoints([]*webhookapi.Endpoint{
-				{DNSName: "a.foobar.com", RecordType: webhookapi.RecordTypeA, Targets: []string{"1.1.1.1"}},
-				{DNSName: "aaaa.foobar.com", RecordType: webhookapi.RecordTypeAAAA, Targets: []string{"::1"}},
-				{DNSName: "txt.foobar.com", RecordType: webhookapi.RecordTypeTXT, Targets: []string{"hi"}},
-				{DNSName: "c.foobar.com", RecordType: webhookapi.RecordTypeCNAME, Targets: []string{"a.foobar.com"}},
-			})
+	// dnsmasq serves every record with its global local_ttl.
+	ttl := endpoint("a.foobar.com", webhookapi.RecordTypeA, "1.1.1.1")
+	ttl.RecordTTL = 60
+	adjusted = p.AdjustEndpoints([]*webhookapi.Endpoint{ttl})
+	if len(adjusted) != 1 || adjusted[0].RecordTTL != 0 {
+		t.Errorf("per-record TTL kept: %v", adjusted)
+	}
+}
 
-			Expect(err).To(BeNil())
-			Expect(adjusted).To(HaveLen(2))
-			Expect(adjusted[0].DNSName).To(Equal("a.foobar.com"))
-			Expect(adjusted[1].DNSName).To(Equal("c.foobar.com"))
-		})
+func TestRecordsReadsThroughToTheRouter(t *testing.T) {
+	router := &fakeOpenWRT{records: map[string]openwrt.DNSRecord{"a": a("a.foobar.com", "1.1.1.1")}}
 
-		It("strips a per-record TTL that dnsmasq cannot honour", func() {
-			p := &Provider{openwrt: mockOpenWRT, log: logger.Discard()}
-			adjusted, err := p.AdjustEndpoints([]*webhookapi.Endpoint{
-				{DNSName: "a.foobar.com", RecordType: webhookapi.RecordTypeA,
-					Targets: []string{"1.1.1.1"}, RecordTTL: webhookapi.TTL(60)},
-			})
-
-			Expect(err).To(BeNil())
-			Expect(adjusted).To(HaveLen(1))
-			Expect(adjusted[0].RecordTTL.IsConfigured()).To(BeFalse())
-		})
-
-		It("handles an empty and a nil-containing list", func() {
-			p := &Provider{openwrt: mockOpenWRT, log: logger.Discard()}
-			adjusted, err := p.AdjustEndpoints([]*webhookapi.Endpoint{nil})
-			Expect(err).To(BeNil())
-			Expect(adjusted).To(BeEmpty())
-		})
-	})
-
-	Context("records", func() {
-		It("reads through to the router", func() {
-			mockOpenWRT.EXPECT().GetDNSRecords(ctx).Return(map[string]openwrt.DNSRecord{
-				"a": {Type: openwrt.RecordTypeA, Name: "a.foobar.com", IP: "1.1.1.1"},
-			}, nil)
-
-			p := &Provider{openwrt: mockOpenWRT, log: logger.Discard()}
-			endpoints, err := p.Records(ctx)
-			Expect(err).To(BeNil())
-			Expect(endpoints).To(HaveLen(1))
-			Expect(endpoints[0].DNSName).To(Equal("a.foobar.com"))
-			Expect(endpoints[0].RecordTTL).To(Equal(webhookapi.TTL(defaultTTL)))
-		})
-	})
-})
+	endpoints, err := newTestProvider(router).Records(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(endpoints) != 1 || endpoints[0].DNSName != "a.foobar.com" || endpoints[0].RecordTTL != defaultTTL {
+		t.Errorf("got %v", endpoints)
+	}
+}

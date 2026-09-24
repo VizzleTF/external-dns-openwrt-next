@@ -65,12 +65,12 @@ func TestLabelValuesAreEscaped(t *testing.T) {
 	}
 }
 
-func TestGaugesGoBothWaysAndCountersOnlyUp(t *testing.T) {
+func TestGaugesAreSetAndCountersOnlyGoUp(t *testing.T) {
 	registry := NewRegistry()
 
 	gauge := registry.Gauge("test_gauge", "A gauge.")
 	gauge.Set(5)
-	gauge.Add(-3)
+	gauge.Set(2)
 
 	counter := registry.Counter("test_counter_total", "A counter.")
 	counter.Inc()

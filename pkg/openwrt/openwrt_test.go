@@ -4,35 +4,61 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
+	"slices"
+	"strings"
 	"testing"
-
-	mocks "github.com/VizzleTF/external-dns-openwrt-next/internal/mocks/lucirpc"
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"go.uber.org/mock/gomock"
 )
-
-func TestOpenWRT(t *testing.T) {
-	RegisterFailHandler(Fail)
-	RunSpecs(t, "OpenWRT Suite")
-	defer GinkgoRecover()
-}
 
 const testOwner = "homelab"
 
+// fakeRPC answers `uci get_all dhcp` with a fixed router state and every other
+// call with success, and records each call as one line, e.g.
+// "uci set dhcp cfg01 name foo.bar.com".
+type fakeRPC struct {
+	sections map[string]map[string]any
+	// fail makes the call spelled exactly like this return an error.
+	fail  map[string]error
+	calls []string
+}
+
+func (f *fakeRPC) call(kind, method string, params []string) (string, error) {
+	call := strings.Join(append([]string{kind, method}, params...), " ")
+	f.calls = append(f.calls, call)
+	if err := f.fail[call]; err != nil {
+		return "", err
+	}
+
+	switch method {
+	case "get_all":
+		payload, err := json.Marshal(f.sections)
+		return string(payload), err
+	case "add":
+		return "cfg01", nil
+	}
+	return "", nil
+}
+
+func (f *fakeRPC) Uci(_ context.Context, method string, params []string) (string, error) {
+	return f.call("uci", method, params)
+}
+
+func (f *fakeRPC) Sys(_ context.Context, method string, params []string) (string, error) {
+	return f.call("sys", method, params)
+}
+
 // section builds the raw shape `uci get_all dhcp` returns for one section.
 // An empty owner means the section carries no ownership marker.
-func section(sectionType, first, second, owner string) map[string]any {
+func section(sectionType, name, value, owner string) map[string]any {
 	options := map[string]any{optionSectionType: sectionType}
 
 	switch sectionType {
 	case sectionTypeDomain:
-		options[optionName] = first
-		options[optionIP] = second
+		options[optionName] = name
+		options[optionIP] = value
 	case sectionTypeCName:
-		options[optionCName] = first
-		options[optionTarget] = second
+		options[optionCName] = name
+		options[optionTarget] = value
 	}
 
 	if owner != "" {
@@ -46,428 +72,372 @@ func domainSection(name, ip, owner string) map[string]any {
 	return section(sectionTypeDomain, name, ip, owner)
 }
 
-var _ = Describe("OpenWRT", func() {
-	var (
-		ctx         context.Context
-		mockCtrl    *gomock.Controller
-		mockLuciRPC *mocks.MockLuciRPC
-	)
+func aRecord(name, ip string) DNSRecord {
+	return DNSRecord{Type: RecordTypeA, Name: name, Value: ip}
+}
 
-	BeforeEach(func() {
-		ctx = context.Background()
-		mockCtrl = gomock.NewController(GinkgoT())
-		mockLuciRPC = mocks.NewMockLuciRPC(mockCtrl)
-	})
+// owning builds a provider scoped to its own records, with adoption on.
+func owning(rpc *fakeRPC) *openWRT {
+	return &openWRT{
+		lucirpc:         rpc,
+		log:             slog.New(slog.DiscardHandler),
+		reloadStrategy:  ReloadStrategyRestart,
+		ownershipID:     testOwner,
+		ownershipOption: DefaultOwnershipOption,
+		adoptExisting:   true,
+	}
+}
 
-	AfterEach(func() {
-		mockCtrl.Finish()
-	})
+// unscoped reproduces the pre-ownership behaviour: every section is managed.
+func unscoped(rpc *fakeRPC) *openWRT {
+	o := owning(rpc)
+	o.ownershipID = ""
+	o.adoptExisting = false
+	return o
+}
 
-	// owning builds a provider scoped to its own records, with adoption on.
-	owning := func() *openWRT {
-		return &openWRT{
-			lucirpc:         mockLuciRPC,
-			log:             logger.Discard(),
-			reloadStrategy:  ReloadStrategyRestart,
-			ownershipID:     testOwner,
-			ownershipOption: DefaultOwnershipOption,
-			adoptExisting:   true,
+const (
+	getAll  = "uci get_all dhcp"
+	commit  = "uci commit dhcp"
+	restart = "sys call " + dnsmasqRestartCommand
+)
+
+func assertCalls(t *testing.T, rpc *fakeRPC, want ...string) {
+	t.Helper()
+	if !slices.Equal(rpc.calls, want) {
+		t.Errorf("calls:\n got %q\nwant %q", rpc.calls, want)
+	}
+}
+
+func TestReadingRecords(t *testing.T) {
+	t.Run("normalises section types and ignores everything else", func(t *testing.T) {
+		rpc := &fakeRPC{sections: map[string]map[string]any{
+			"x": domainSection("foobar", "1.1.1.1", ""),
+			"y": section(sectionTypeCName, "foobar", "bar.foo.com", ""),
+			"z": {optionSectionType: "whatever"},
+		}}
+
+		records, err := unscoped(rpc).GetDNSRecords(context.Background())
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-
-	// unscoped reproduces the pre-ownership behaviour: every section is managed.
-	unscoped := func() *openWRT {
-		return &openWRT{
-			lucirpc:         mockLuciRPC,
-			log:             logger.Discard(),
-			reloadStrategy:  ReloadStrategyRestart,
-			ownershipOption: DefaultOwnershipOption,
+		want := map[string]DNSRecord{
+			"x": {Type: RecordTypeA, Name: "foobar", Value: "1.1.1.1"},
+			"y": {Type: RecordTypeCNAME, Name: "foobar", Value: "bar.foo.com"},
 		}
-	}
-
-	expectGetAll := func(sections map[string]map[string]any) {
-		payload, err := json.Marshal(sections)
-		Expect(err).To(BeNil())
-		mockLuciRPC.EXPECT().Uci(ctx, "get_all", []string{uciConfig}).Return(string(payload), nil)
-	}
-
-	expectCommitAndReload := func() {
-		mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{uciConfig}).Return("", nil)
-		mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqRestartCommand}).Return("0", nil)
-	}
-
-	aRecord := func(name, ip string) DNSRecord {
-		return DNSRecord{Type: RecordTypeA, Name: name, IP: ip}
-	}
-
-	Context("reading records", func() {
-		It("normalises section types and ignores everything else", func() {
-			expectGetAll(map[string]map[string]any{
-				"x": domainSection("foobar", "1.1.1.1", ""),
-				"y": section(sectionTypeCName, "foobar", "bar.foo.com", ""),
-				"z": {optionSectionType: "whatever"},
-			})
-
-			records, err := unscoped().GetDNSRecords(ctx)
-			Expect(err).To(BeNil())
-			Expect(records).To(Equal(map[string]DNSRecord{
-				"x": {Type: RecordTypeA, Name: "foobar", IP: "1.1.1.1"},
-				"y": {Type: RecordTypeCNAME, CName: "foobar", Target: "bar.foo.com"},
-			}))
-		})
-
-		It("skips a section whose name is a list rather than a single value", func() {
-			expectGetAll(map[string]map[string]any{
-				"multi": {
-					optionSectionType: sectionTypeDomain,
-					optionName:        []any{"a.foo.com", "b.foo.com"},
-					optionIP:          "1.1.1.1",
-				},
-			})
-
-			records, err := unscoped().GetDNSRecords(ctx)
-			Expect(err).To(BeNil())
-			Expect(records).To(BeEmpty())
-		})
-
-		It("returns only records carrying our marker", func() {
-			expectGetAll(map[string]map[string]any{
-				"mine":    domainSection("mine.foo.com", "1.1.1.1", testOwner),
-				"manual":  domainSection("manual.foo.com", "2.2.2.2", ""),
-				"someone": domainSection("other.foo.com", "3.3.3.3", "other-instance"),
-			})
-
-			records, err := owning().GetDNSRecords(ctx)
-			Expect(err).To(BeNil())
-			Expect(records).To(HaveLen(1))
-			Expect(records["mine"].Name).To(Equal("mine.foo.com"))
-		})
+		if len(records) != len(want) || records["x"] != want["x"] || records["y"] != want["y"] {
+			t.Errorf("got %v, want %v", records, want)
+		}
 	})
 
-	Context("adding", func() {
-		It("stamps the marker on a record it creates", func() {
-			cfg := "cfg01"
-			expectGetAll(map[string]map[string]any{})
-			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{uciConfig, sectionTypeDomain}).Return(cfg, nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionName, "foo.bar.com"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionIP, "1.1.1.1"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, DefaultOwnershipOption, testOwner}).Return("", nil)
-			expectCommitAndReload()
+	t.Run("skips a section whose name is a list rather than a single value", func(t *testing.T) {
+		rpc := &fakeRPC{sections: map[string]map[string]any{
+			"multi": {
+				optionSectionType: sectionTypeDomain,
+				optionName:        []any{"a.foo.com", "b.foo.com"},
+				optionIP:          "1.1.1.1",
+			},
+		}}
 
-			Expect(owning().ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")})).To(BeNil())
-		})
+		records, err := unscoped(rpc).GetDNSRecords(context.Background())
+		if err != nil || len(records) != 0 {
+			t.Errorf("got %v, %v", records, err)
+		}
+	})
 
-		It("writes no marker when ownership is disabled", func() {
-			cfg := "cfg02"
-			expectGetAll(map[string]map[string]any{})
-			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{uciConfig, sectionTypeDomain}).Return(cfg, nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionName, "foo.bar.com"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionIP, "1.1.1.1"}).Return("", nil)
-			expectCommitAndReload()
+	t.Run("returns only records carrying our marker", func(t *testing.T) {
+		rpc := &fakeRPC{sections: map[string]map[string]any{
+			"mine":    domainSection("mine.foo.com", "1.1.1.1", testOwner),
+			"manual":  domainSection("manual.foo.com", "2.2.2.2", ""),
+			"someone": domainSection("other.foo.com", "3.3.3.3", "other-instance"),
+		}}
 
-			Expect(unscoped().ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")})).To(BeNil())
-		})
+		records, err := owning(rpc).GetDNSRecords(context.Background())
+		if err != nil || len(records) != 1 || records["mine"].Name != "mine.foo.com" {
+			t.Errorf("got %v, %v", records, err)
+		}
+	})
+}
 
-		It("adopts an identical unowned section instead of duplicating it", func() {
+func TestAdding(t *testing.T) {
+	ctx := context.Background()
+	stamp := "uci set dhcp cfg01 " + DefaultOwnershipOption + " " + testOwner
+
+	for _, tc := range []struct {
+		name     string
+		sections map[string]map[string]any
+		provider func(*fakeRPC) *openWRT
+		add      DNSRecord
+		want     []string
+	}{
+		{
+			name:     "stamps the marker on a record it creates",
+			provider: owning,
+			add:      aRecord("foo.bar.com", "1.1.1.1"),
+			want: []string{getAll, "uci add dhcp domain",
+				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", stamp, commit, restart},
+		},
+		{
+			name:     "writes no marker when ownership is disabled",
+			provider: unscoped,
+			add:      aRecord("foo.bar.com", "1.1.1.1"),
+			want: []string{getAll, "uci add dhcp domain",
+				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", commit, restart},
+		},
+		{
+			name:     "writes a CNAME section",
+			provider: unscoped,
+			add:      DNSRecord{Type: RecordTypeCNAME, Name: "Alias.bar.com", Value: "Target.bar.com."},
+			want: []string{getAll, "uci add dhcp cname",
+				"uci set dhcp cfg01 cname alias.bar.com", "uci set dhcp cfg01 target target.bar.com", commit, restart},
+		},
+		{
 			// The migration path: records already on the router get stamped on
 			// the first reconcile rather than added a second time.
-			expectGetAll(map[string]map[string]any{
-				"existing": domainSection("foo.bar.com", "1.1.1.1", ""),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "set",
-				[]string{uciConfig, "existing", DefaultOwnershipOption, testOwner}).Return("", nil)
-			expectCommitAndReload()
-
-			Expect(owning().ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")})).To(BeNil())
-		})
-
-		It("adopts a section whose name differs only in case or trailing dot", func() {
+			name:     "adopts an identical unowned section instead of duplicating it",
+			sections: map[string]map[string]any{"existing": domainSection("foo.bar.com", "1.1.1.1", "")},
+			provider: owning,
+			add:      aRecord("foo.bar.com", "1.1.1.1"),
+			want:     []string{getAll, "uci set dhcp existing " + DefaultOwnershipOption + " " + testOwner, commit, restart},
+		},
+		{
 			// ExternalDNS compares names canonically, dnsmasq answers them
 			// case-insensitively, and UCI stores whatever was typed into LuCI.
 			// Matching literally would add a duplicate for a name the router
 			// already serves.
-			expectGetAll(map[string]map[string]any{
-				"existing": domainSection("FOO.bar.com.", "1.1.1.1", ""),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "set",
-				[]string{uciConfig, "existing", DefaultOwnershipOption, testOwner}).Return("", nil)
-			expectCommitAndReload()
-
-			Expect(owning().ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")})).To(BeNil())
+			name:     "adopts a section whose name differs only in case or trailing dot",
+			sections: map[string]map[string]any{"existing": domainSection("FOO.bar.com.", "1.1.1.1", "")},
+			provider: owning,
+			add:      aRecord("foo.bar.com", "1.1.1.1"),
+			want:     []string{getAll, "uci set dhcp existing " + DefaultOwnershipOption + " " + testOwner, commit, restart},
+		},
+		{
+			name:     "writes the canonical spelling of a name",
+			provider: unscoped,
+			add:      aRecord("FOO.Bar.com.", "1.1.1.1"),
+			want: []string{getAll, "uci add dhcp domain",
+				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", commit, restart},
+		},
+		{
+			name:     "does not adopt when adoption is switched off",
+			sections: map[string]map[string]any{"existing": domainSection("foo.bar.com", "1.1.1.1", "")},
+			provider: func(rpc *fakeRPC) *openWRT {
+				o := owning(rpc)
+				o.adoptExisting = false
+				return o
+			},
+			add: aRecord("foo.bar.com", "1.1.1.1"),
+			want: []string{getAll, "uci add dhcp domain",
+				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", stamp, commit, restart},
+		},
+		{
+			name:     "never adopts a section owned by another instance",
+			sections: map[string]map[string]any{"theirs": domainSection("foo.bar.com", "1.1.1.1", "other-instance")},
+			provider: owning,
+			add:      aRecord("foo.bar.com", "1.1.1.1"),
+			want: []string{getAll, "uci add dhcp domain",
+				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", stamp, commit, restart},
+		},
+		{
+			name:     "is a no-op when the record is already owned and present",
+			sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)},
+			provider: owning,
+			add:      aRecord("foo.bar.com", "1.1.1.1"),
+			want:     []string{getAll},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rpc := &fakeRPC{sections: tc.sections}
+			if err := tc.provider(rpc).ApplyDNSRecords(ctx, nil, []DNSRecord{tc.add}); err != nil {
+				t.Fatal(err)
+			}
+			assertCalls(t, rpc, tc.want...)
 		})
+	}
 
-		It("writes the canonical spelling of a name", func() {
-			cfg := "cfg04"
-			expectGetAll(map[string]map[string]any{})
-			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{uciConfig, sectionTypeDomain}).Return(cfg, nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionName, "foo.bar.com"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionIP, "1.1.1.1"}).Return("", nil)
-			expectCommitAndReload()
-
-			Expect(unscoped().ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("FOO.Bar.com.", "1.1.1.1")})).To(BeNil())
-		})
-
-		It("does not adopt when adoption is switched off", func() {
-			cfg := "cfg03"
-			expectGetAll(map[string]map[string]any{
-				"existing": domainSection("foo.bar.com", "1.1.1.1", ""),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{uciConfig, sectionTypeDomain}).Return(cfg, nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionName, "foo.bar.com"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionIP, "1.1.1.1"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, DefaultOwnershipOption, testOwner}).Return("", nil)
-			expectCommitAndReload()
-
-			o := owning()
-			o.adoptExisting = false
-			Expect(o.ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")})).To(BeNil())
-		})
-
-		It("never adopts a section owned by another instance", func() {
-			cfg := "cfg04"
-			expectGetAll(map[string]map[string]any{
-				"theirs": domainSection("foo.bar.com", "1.1.1.1", "other-instance"),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{uciConfig, sectionTypeDomain}).Return(cfg, nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionName, "foo.bar.com"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionIP, "1.1.1.1"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, DefaultOwnershipOption, testOwner}).Return("", nil)
-			expectCommitAndReload()
-
-			Expect(owning().ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")})).To(BeNil())
-		})
-
-		It("is a no-op when the record is already owned and present", func() {
-			expectGetAll(map[string]map[string]any{
-				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
-			})
-
-			Expect(owning().ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")})).To(BeNil())
-		})
-
-		It("rejects incomplete records", func() {
-			expectGetAll(map[string]map[string]any{})
-			err := owning().ApplyDNSRecords(ctx, nil, []DNSRecord{{Type: RecordTypeA, Name: "foo.bar.com"}})
-			Expect(err).ToNot(BeNil())
-			Expect(err.Error()).To(ContainSubstring("ip is required"))
-		})
+	t.Run("rejects incomplete records", func(t *testing.T) {
+		rpc := &fakeRPC{}
+		err := owning(rpc).ApplyDNSRecords(ctx, nil, []DNSRecord{{Type: RecordTypeA, Name: "foo.bar.com"}})
+		if err == nil || !strings.Contains(err.Error(), "value is required") {
+			t.Errorf("got %v", err)
+		}
+		assertCalls(t, rpc, getAll)
 	})
+}
 
-	Context("deleting", func() {
-		It("deletes a record it owns", func() {
-			expectGetAll(map[string]map[string]any{
-				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
-			expectCommitAndReload()
+func TestDeleting(t *testing.T) {
+	ctx := context.Background()
 
-			Expect(owning().ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)).To(BeNil())
-		})
-
-		It("deletes a record the change set spells differently", func() {
+	for _, tc := range []struct {
+		name     string
+		sections map[string]map[string]any
+		remove   []DNSRecord
+		want     []string
+	}{
+		{
+			name:     "deletes a record it owns",
+			sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)},
+			remove:   []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")},
+			want:     []string{getAll, "uci delete dhcp mine", commit, restart},
+		},
+		{
 			// A name whose case or trailing dot changed between what was
 			// written and what is asked for must still resolve to the same
 			// section, or the record would be stranded on the router forever.
-			expectGetAll(map[string]map[string]any{
-				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
-			expectCommitAndReload()
-
-			Expect(owning().ApplyDNSRecords(ctx, []DNSRecord{aRecord("Foo.BAR.com.", "1.1.1.1")}, nil)).To(BeNil())
-		})
-
-		It("refuses to delete a manually created record", func() {
+			name:     "deletes a record the change set spells differently",
+			sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)},
+			remove:   []DNSRecord{aRecord("Foo.BAR.com.", "1.1.1.1")},
+			want:     []string{getAll, "uci delete dhcp mine", commit, restart},
+		},
+		{
 			// The whole point of ownership: policy=sync must not be able to
-			// remove entries nobody handed to ExternalDNS.
-			expectGetAll(map[string]map[string]any{
-				"manual": domainSection("s3.vaka.work", "10.11.12.237", ""),
-			})
-			// No delete, no commit, no reload.
-
-			Expect(owning().ApplyDNSRecords(ctx,
-				[]DNSRecord{aRecord("s3.vaka.work", "10.11.12.237")}, nil)).To(BeNil())
-		})
-
-		It("refuses to delete a record owned by another instance", func() {
-			expectGetAll(map[string]map[string]any{
-				"theirs": domainSection("foo.bar.com", "1.1.1.1", "other-instance"),
-			})
-
-			Expect(owning().ApplyDNSRecords(ctx,
-				[]DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)).To(BeNil())
-		})
-
-		It("treats an already absent record as success", func() {
-			expectGetAll(map[string]map[string]any{})
-
-			Expect(owning().ApplyDNSRecords(ctx,
-				[]DNSRecord{aRecord("gone.bar.com", "1.1.1.1")}, nil)).To(BeNil())
-		})
-
-		It("deletes every requested record, not just the first", func() {
-			expectGetAll(map[string]map[string]any{
+			// remove entries nobody handed to ExternalDNS. No delete, no
+			// commit, no reload.
+			name:     "refuses to delete a manually created record",
+			sections: map[string]map[string]any{"manual": domainSection("s3.vaka.work", "10.11.12.237", "")},
+			remove:   []DNSRecord{aRecord("s3.vaka.work", "10.11.12.237")},
+			want:     []string{getAll},
+		},
+		{
+			name:     "refuses to delete a record owned by another instance",
+			sections: map[string]map[string]any{"theirs": domainSection("foo.bar.com", "1.1.1.1", "other-instance")},
+			remove:   []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")},
+			want:     []string{getAll},
+		},
+		{
+			name:   "treats an already absent record as success",
+			remove: []DNSRecord{aRecord("gone.bar.com", "1.1.1.1")},
+			want:   []string{getAll},
+		},
+		{
+			name: "deletes every requested record, not just the first",
+			sections: map[string]map[string]any{
 				"a": domainSection("one.bar.com", "1.1.1.1", testOwner),
 				"b": domainSection("two.bar.com", "2.2.2.2", testOwner),
 				"c": domainSection("three.bar.com", "3.3.3.3", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "a"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "b"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "c"}).Return("", nil)
-			expectCommitAndReload()
-
-			Expect(owning().ApplyDNSRecords(ctx, []DNSRecord{
+			},
+			remove: []DNSRecord{
 				aRecord("one.bar.com", "1.1.1.1"),
 				aRecord("two.bar.com", "2.2.2.2"),
 				aRecord("three.bar.com", "3.3.3.3"),
-			}, nil)).To(BeNil())
-		})
-
-		It("deletes only the target it was asked for on a multi-target name", func() {
-			expectGetAll(map[string]map[string]any{
+			},
+			want: []string{getAll, "uci delete dhcp a", "uci delete dhcp b", "uci delete dhcp c", commit, restart},
+		},
+		{
+			name: "deletes only the target it was asked for on a multi-target name",
+			sections: map[string]map[string]any{
 				"keep": domainSection("multi.bar.com", "1.1.1.1", testOwner),
 				"drop": domainSection("multi.bar.com", "2.2.2.2", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "drop"}).Return("", nil)
-			expectCommitAndReload()
-
-			Expect(owning().ApplyDNSRecords(ctx,
-				[]DNSRecord{aRecord("multi.bar.com", "2.2.2.2")}, nil)).To(BeNil())
+			},
+			remove: []DNSRecord{aRecord("multi.bar.com", "2.2.2.2")},
+			want:   []string{getAll, "uci delete dhcp drop", commit, restart},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rpc := &fakeRPC{sections: tc.sections}
+			if err := owning(rpc).ApplyDNSRecords(ctx, tc.remove, nil); err != nil {
+				t.Fatal(err)
+			}
+			assertCalls(t, rpc, tc.want...)
 		})
+	}
 
-		It("propagates a delete failure", func() {
-			expectGetAll(map[string]map[string]any{
-				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", errors.New("boom"))
-
-			err := owning().ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)
-			Expect(err).ToNot(BeNil())
-			Expect(err.Error()).To(ContainSubstring("boom"))
-		})
+	t.Run("propagates a delete failure", func(t *testing.T) {
+		rpc := &fakeRPC{
+			sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)},
+			fail:     map[string]error{"uci delete dhcp mine": errors.New("boom")},
+		}
+		err := owning(rpc).ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)
+		if err == nil || !strings.Contains(err.Error(), "boom") {
+			t.Errorf("got %v", err)
+		}
+		assertCalls(t, rpc, getAll, "uci delete dhcp mine")
 	})
+}
 
-	Context("updating", func() {
-		It("removes the old target and adds the new one in a single commit", func() {
-			cfg := "cfg05"
-			expectGetAll(map[string]map[string]any{
-				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "add", []string{uciConfig, sectionTypeDomain}).Return(cfg, nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionName, "foo.bar.com"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, optionIP, "9.9.9.9"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "set", []string{uciConfig, cfg, DefaultOwnershipOption, testOwner}).Return("", nil)
-			expectCommitAndReload()
+func TestUpdatingRemovesAndAddsInASingleCommit(t *testing.T) {
+	rpc := &fakeRPC{sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)}}
 
-			Expect(owning().ApplyDNSRecords(ctx,
-				[]DNSRecord{aRecord("foo.bar.com", "1.1.1.1")},
-				[]DNSRecord{aRecord("foo.bar.com", "9.9.9.9")},
-			)).To(BeNil())
+	err := owning(rpc).ApplyDNSRecords(context.Background(),
+		[]DNSRecord{aRecord("foo.bar.com", "1.1.1.1")},
+		[]DNSRecord{aRecord("foo.bar.com", "9.9.9.9")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertCalls(t, rpc, getAll, "uci delete dhcp mine", "uci add dhcp domain",
+		"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 9.9.9.9",
+		"uci set dhcp cfg01 "+DefaultOwnershipOption+" "+testOwner, commit, restart)
+}
+
+func TestReloadStrategies(t *testing.T) {
+	for _, tc := range []struct {
+		strategy string
+		want     []string
+	}{
+		{ReloadStrategyNone, nil},
+		{ReloadStrategyReload, []string{"sys call " + dnsmasqReloadCommand}},
+		{ReloadStrategyRestart, []string{restart}},
+		// A config name here would be read as rollback=true and the change
+		// would revert itself after ~90s, so uci apply takes NO arguments.
+		{ReloadStrategyUciApply, []string{"uci apply"}},
+	} {
+		t.Run(tc.strategy, func(t *testing.T) {
+			rpc := &fakeRPC{sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)}}
+			o := owning(rpc)
+			o.reloadStrategy = tc.strategy
+
+			if err := o.ApplyDNSRecords(context.Background(), []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil); err != nil {
+				t.Fatal(err)
+			}
+			assertCalls(t, rpc, append([]string{getAll, "uci delete dhcp mine", commit}, tc.want...)...)
 		})
+	}
+
+	t.Run("reports a failed reload", func(t *testing.T) {
+		rpc := &fakeRPC{
+			sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)},
+			fail:     map[string]error{restart: errors.New("no acl")},
+		}
+		err := owning(rpc).ApplyDNSRecords(context.Background(), []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)
+		if err == nil || !strings.Contains(err.Error(), "restart dnsmasq") {
+			t.Errorf("got %v", err)
+		}
 	})
+}
 
-	Context("reload strategies", func() {
-		It("skips the reload entirely when disabled", func() {
-			expectGetAll(map[string]map[string]any{
-				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{uciConfig}).Return("", nil)
+func TestNothingToDoDoesNotEvenReadTheRouter(t *testing.T) {
+	rpc := &fakeRPC{}
+	if err := owning(rpc).ApplyDNSRecords(context.Background(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	assertCalls(t, rpc)
+}
 
-			o := owning()
-			o.reloadStrategy = ReloadStrategyNone
-			Expect(o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)).To(BeNil())
-		})
+func TestConfig(t *testing.T) {
+	for _, strategy := range []string{ReloadStrategyRestart, ReloadStrategyReload, ReloadStrategyUciApply, ReloadStrategyNone} {
+		if err := validateReloadStrategy(strategy); err != nil {
+			t.Errorf("%s: %v", strategy, err)
+		}
+	}
+	// "dnsmasq", the old name of reload, is no longer accepted.
+	for _, strategy := range []string{"dnsmasq", "nope"} {
+		if validateReloadStrategy(strategy) == nil {
+			t.Errorf("%s: accepted", strategy)
+		}
+	}
 
-		It("uses the reload command when explicitly asked for it", func() {
-			expectGetAll(map[string]map[string]any{
-				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{uciConfig}).Return("", nil)
-			mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqReloadCommand}).Return("0", nil)
+	for option, valid := range map[string]bool{
+		"external_dns": true, "externalDns2": true,
+		"external-dns": false, "external dns": false, "": false,
+	} {
+		if err := validateOwnershipOption(option); (err == nil) != valid {
+			t.Errorf("ownership option %q: got %v", option, err)
+		}
+	}
 
-			o := owning()
-			o.reloadStrategy = ReloadStrategyReload
-			Expect(o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)).To(BeNil())
-		})
-
-		It("treats the legacy \"dnsmasq\" value as reload", func() {
-			expectGetAll(map[string]map[string]any{
-				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{uciConfig}).Return("", nil)
-			mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqReloadCommand}).Return("0", nil)
-
-			o := owning()
-			o.reloadStrategy = "dnsmasq"
-			Expect(o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)).To(BeNil())
-		})
-
-		It("calls uci apply with NO arguments so rollback is not armed", func() {
-			expectGetAll(map[string]map[string]any{
-				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{uciConfig}).Return("", nil)
-			// A config name here would be read as rollback=true and the change
-			// would revert itself after ~90s.
-			mockLuciRPC.EXPECT().Uci(ctx, "apply", []string{}).Return("", nil)
-
-			o := owning()
-			o.reloadStrategy = ReloadStrategyUciApply
-			Expect(o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)).To(BeNil())
-		})
-
-		It("reports a failed reload", func() {
-			expectGetAll(map[string]map[string]any{
-				"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner),
-			})
-			mockLuciRPC.EXPECT().Uci(ctx, "delete", []string{uciConfig, "mine"}).Return("", nil)
-			mockLuciRPC.EXPECT().Uci(ctx, "commit", []string{uciConfig}).Return("", nil)
-			mockLuciRPC.EXPECT().Sys(ctx, "call", []string{dnsmasqRestartCommand}).Return("", errors.New("no acl"))
-
-			err := owning().ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)
-			Expect(err).ToNot(BeNil())
-			Expect(err.Error()).To(ContainSubstring("restart dnsmasq"))
-		})
-	})
-
-	Context("no-op", func() {
-		It("does not even read the router when there is nothing to do", func() {
-			Expect(owning().ApplyDNSRecords(ctx, nil, nil)).To(BeNil())
-		})
-	})
-
-	Context("config", func() {
-		It("accepts the known reload strategies and rejects anything else", func() {
-			Expect(validateReloadStrategy(ReloadStrategyRestart)).To(BeNil())
-			Expect(validateReloadStrategy(ReloadStrategyReload)).To(BeNil())
-			// Legacy alias for the old "dnsmasq" value must keep working.
-			Expect(validateReloadStrategy("dnsmasq")).To(BeNil())
-			Expect(normaliseReloadStrategy("dnsmasq")).To(Equal(ReloadStrategyReload))
-			Expect(validateReloadStrategy(ReloadStrategyUciApply)).To(BeNil())
-			Expect(validateReloadStrategy(ReloadStrategyNone)).To(BeNil())
-			Expect(validateReloadStrategy("nope")).ToNot(BeNil())
-		})
-
-		It("rejects an ownership option that UCI would not accept", func() {
-			Expect(validateOwnershipOption("external_dns")).To(BeNil())
-			Expect(validateOwnershipOption("externalDns2")).To(BeNil())
-			Expect(validateOwnershipOption("external-dns")).ToNot(BeNil())
-			Expect(validateOwnershipOption("external dns")).ToNot(BeNil())
-			Expect(validateOwnershipOption("")).ToNot(BeNil())
-		})
-
-		It("reports whether ownership is enabled", func() {
-			Expect((&Config{}).OwnershipEnabled()).To(BeFalse())
-			Expect((&Config{OwnershipID: testOwner}).OwnershipEnabled()).To(BeTrue())
-			Expect(DefaultConfig().OwnershipEnabled()).To(BeFalse())
-			Expect(DefaultConfig().OwnershipOption).To(Equal(DefaultOwnershipOption))
-			Expect(DefaultConfig().AdoptExisting).To(BeTrue())
-			Expect(DefaultConfig().ReloadStrategy).To(Equal(ReloadStrategyRestart))
-		})
-	})
-})
+	cfg := DefaultConfig()
+	if cfg.OwnershipID != "" || cfg.OwnershipOption != DefaultOwnershipOption ||
+		!cfg.AdoptExisting || cfg.ReloadStrategy != ReloadStrategyRestart {
+		t.Errorf("defaults: got %+v", cfg)
+	}
+}

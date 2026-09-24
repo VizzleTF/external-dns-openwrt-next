@@ -21,11 +21,6 @@ import (
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/metrics"
 )
 
-// Handler registers the application routes on a mux.
-type Handler interface {
-	Register(mux *http.ServeMux)
-}
-
 type Router struct {
 	api    *http.Server
 	health *http.Server
@@ -33,9 +28,10 @@ type Router struct {
 }
 
 // New builds both HTTP servers. It cannot fail, so it returns no error.
-func New(config *Config, log *slog.Logger, registry *metrics.Registry, handler Handler) *Router {
+// register puts the application routes on the provider API mux.
+func New(config *Config, log *slog.Logger, registry *metrics.Registry, register func(*http.ServeMux)) *Router {
 	apiMux := http.NewServeMux()
-	handler.Register(apiMux)
+	register(apiMux)
 
 	healthMux := http.NewServeMux()
 	healthMux.HandleFunc(config.HealthCheckPath, func(w http.ResponseWriter, _ *http.Request) {

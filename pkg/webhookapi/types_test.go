@@ -85,7 +85,7 @@ func assertChangesPayload(t *testing.T, payload string) {
 	if got := changes.Create[0].RecordType; got != RecordTypeA {
 		t.Errorf("recordType: got %q", got)
 	}
-	if got := changes.Create[0].RecordTTL; got != 300 || !got.IsConfigured() {
+	if got := changes.Create[0].RecordTTL; got != 300 {
 		t.Errorf("recordTTL: got %d", got)
 	}
 
@@ -114,12 +114,12 @@ func assertChangesPayload(t *testing.T, payload string) {
 func TestEndpointRoundTripKeepsFieldNames(t *testing.T) {
 	in := &Endpoint{
 		DNSName:          "a.example.com",
-		Targets:          Targets{"1.2.3.4"},
+		Targets:          []string{"1.2.3.4"},
 		RecordType:       RecordTypeA,
 		SetIdentifier:    "id",
 		RecordTTL:        60,
-		Labels:           Labels{"k": "v"},
-		ProviderSpecific: ProviderSpecific{{Name: "n", Value: "v"}},
+		Labels:           map[string]string{"k": "v"},
+		ProviderSpecific: []ProviderSpecificProperty{{Name: "n", Value: "v"}},
 	}
 
 	encoded, err := json.Marshal(in)
@@ -142,7 +142,7 @@ func TestEndpointRoundTripKeepsFieldNames(t *testing.T) {
 	}
 }
 
-func TestUnsetTTLIsOmittedAndNotConfigured(t *testing.T) {
+func TestUnsetTTLIsOmitted(t *testing.T) {
 	encoded, err := json.Marshal(&Endpoint{DNSName: "a.example.com", RecordType: RecordTypeA})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
@@ -155,9 +155,6 @@ func TestUnsetTTLIsOmittedAndNotConfigured(t *testing.T) {
 
 	if _, ok := generic["recordTTL"]; ok {
 		t.Errorf("an unset TTL must not be serialised: %s", encoded)
-	}
-	if TTL(0).IsConfigured() {
-		t.Error("TTL(0) must not count as configured")
 	}
 }
 
@@ -181,18 +178,5 @@ func TestDomainFilterSerialisesIncludeAndExclude(t *testing.T) {
 
 	if got, want := string(encoded), `{"include":["example.com"],"exclude":null}`; got != want {
 		t.Errorf("got %s, want %s", got, want)
-	}
-}
-
-func TestChangesEmpty(t *testing.T) {
-	var nilChanges *Changes
-	if !nilChanges.Empty() {
-		t.Error("nil Changes must be empty")
-	}
-	if !(&Changes{}).Empty() {
-		t.Error("zero Changes must be empty")
-	}
-	if (&Changes{Delete: []*Endpoint{{DNSName: "a"}}}).Empty() {
-		t.Error("Changes with a deletion is not empty")
 	}
 }

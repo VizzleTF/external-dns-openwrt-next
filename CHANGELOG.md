@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+A pass for over-engineering: what the code carried without needing it is gone.
+Nothing here changes what lands on the router.
+
+### Fixed
+
+- **Wrong router credentials were reported as `http: Forbidden`.** LuCI answers
+  a failed login with `{"result":null}`, which the client decodes to an empty
+  string, while the check looked for the literal `"null"`. The empty token was
+  stored, the retried call went out unauthenticated, and the operator saw a 403
+  instead of `rpc: login fail`. An empty token is now the login failure it is.
+
+### Removed
+
+- **`PROVIDER_OPENWRT_RELOADSTRATEGY=dnsmasq`.** The legacy alias for `reload`,
+  kept since v0.4.0, now fails validation at startup. Use `reload`.
+- **An empty `PROVIDER_OPENWRT_OWNERSHIPOPTION` no longer falls back to
+  `external_dns`.** The default already comes from the config; setting the
+  variable to an empty string now fails validation at startup instead of being
+  silently overridden.
+- **`PROVIDER_OPENWRT_LUCIRPC_RPC_ID`.** The JSON-RPC request id is always `1`;
+  nothing on the router reads it. A leftover variable is ignored.
+- The test-only dependencies — ginkgo, gomega and uber mock — and the generated
+  mocks: every test now runs on `testing` with hand-written fakes, and the
+  module requires nothing at all.
+- Duplicate error logging in the LuCI client: a failed call was logged there
+  and again by the webhook. The webhook's line, which carries the error, stays.
+
 ## v0.7.0
 
 Catch-up with upstream ExternalDNS, which moved on while this fork was being

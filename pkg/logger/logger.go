@@ -34,11 +34,6 @@ func New(config *Config) (*slog.Logger, error) {
 	return slog.New(handler), nil
 }
 
-// Discard returns a logger that writes nothing, for tests.
-func Discard() *slog.Logger {
-	return slog.New(slog.DiscardHandler)
-}
-
 func parseLevel(level string) (slog.Level, error) {
 	switch strings.ToLower(level) {
 	case "debug":

@@ -27,11 +27,13 @@ const (
 // holds exactly one value, so an endpoint with several targets spans several
 // sections.
 type DNSRecord struct {
-	Type   string
-	IP     string
-	Name   string
-	CName  string
-	Target string
+	Type string
+	// Name is the owner name: `name` of a domain section, `cname` of a cname
+	// section.
+	Name string
+	// Value is the right-hand side: `ip` of a domain section, `target` of a
+	// cname section.
+	Value string
 
 	// Owner is the value of the ownership option on the section, empty when the
 	// section carries no marker. Only meaningful on records read back from the
@@ -39,7 +41,7 @@ type DNSRecord struct {
 	Owner string
 }
 
-// canonicalName reduces a DNS name to what a comparison should see: trimmed,
+// CanonicalName reduces a DNS name to what a comparison should see: trimmed,
 // lower-cased, without the trailing dot.
 //
 // ExternalDNS compares names exactly that way — `internal/idna.NormalizeDNSName`,
@@ -51,13 +53,9 @@ type DNSRecord struct {
 // Non-ASCII names are passed through as they are. ExternalDNS maps those to
 // punycode via golang.org/x/net/idna, and this binary links no third-party
 // packages; such a name would not resolve through dnsmasq either.
-func canonicalName(name string) string {
+func CanonicalName(name string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
 }
-
-// CanonicalName is canonicalName for the provider layer, which has to group
-// sections the same way this package matches them.
-func CanonicalName(name string) string { return canonicalName(name) }
 
 // Key is the full identity of a record: type plus BOTH sides of the mapping.
 //
@@ -65,68 +63,34 @@ func CanonicalName(name string) string { return canonicalName(name) }
 // endpoints that carry several targets — every UCI section sharing the name
 // looks identical, so an arbitrary one gets deleted. UCI section order is not
 // stable either, since `uci get_all` is unmarshalled into a map.
-//
-// Names are compared canonically, values as written: an IP is a literal, and a
-// CNAME target is a name.
 func (r DNSRecord) Key() string {
-	switch r.Type {
-	case RecordTypeA:
-		return fmt.Sprintf("%s|%s|%s", RecordTypeA, canonicalName(r.Name), r.IP)
-	case RecordTypeCNAME:
-		return fmt.Sprintf("%s|%s|%s", RecordTypeCNAME, canonicalName(r.CName), canonicalName(r.Target))
-	default:
-		return fmt.Sprintf("%s|%s|%s|%s|%s", r.Type,
-			canonicalName(r.Name), r.IP, canonicalName(r.CName), canonicalName(r.Target))
-	}
+	c := r.canonical()
+	return c.Type + "|" + c.Name + "|" + c.Value
 }
 
 // canonical returns the record as it should be written to UCI, so the router
 // holds one spelling of a name rather than whichever one an annotation used.
+// Names are canonicalised, values as written: an IP is a literal, and a CNAME
+// target is a name.
 func (r DNSRecord) canonical() DNSRecord {
-	r.Name = canonicalName(r.Name)
-	r.CName = canonicalName(r.CName)
-	r.Target = canonicalName(r.Target)
+	r.Name = CanonicalName(r.Name)
+	if r.Type == RecordTypeCNAME {
+		r.Value = CanonicalName(r.Value)
+	}
 	return r
 }
 
-// DNSName returns the owner name of the record regardless of its type.
-func (r DNSRecord) DNSName() string {
-	if r.Type == RecordTypeCNAME {
-		return r.CName
-	}
-	return r.Name
-}
-
-// Value returns the right-hand side of the record regardless of its type.
-func (r DNSRecord) Value() string {
-	if r.Type == RecordTypeCNAME {
-		return r.Target
-	}
-	return r.IP
-}
-
 // Validate reports whether the record can be written to UCI.
+//
+// Canonically empty, not literally: a name of "." or " " carries no more
+// information than "" and must not reach the router either.
 func (r DNSRecord) Validate() error {
-	switch r.Type {
-	case RecordTypeA:
-		// Canonically empty, not literally: a name of "." or " " carries no
-		// more information than "" and must not reach the router either.
-		if canonicalName(r.Name) == "" {
-			return fmt.Errorf("name is required for an %s record", RecordTypeA)
-		}
-		if r.IP == "" {
-			return fmt.Errorf("ip is required for an %s record", RecordTypeA)
-		}
-	case RecordTypeCNAME:
-		if canonicalName(r.CName) == "" {
-			return fmt.Errorf("cname is required for a %s record", RecordTypeCNAME)
-		}
-		if canonicalName(r.Target) == "" {
-			return fmt.Errorf("target is required for a %s record", RecordTypeCNAME)
-		}
-	default:
-		return fmt.Errorf("invalid record type: %s", r.Type)
+	c := r.canonical()
+	if c.Name == "" {
+		return fmt.Errorf("name is required for a %s record", r.Type)
 	}
-
+	if c.Value == "" {
+		return fmt.Errorf("value is required for a %s record", r.Type)
+	}
 	return nil
 }

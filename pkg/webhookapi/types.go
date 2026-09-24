@@ -16,28 +16,16 @@
 // DomainFilter below. types_test.go pins every field against the wire.
 package webhookapi
 
-// Record types. Only A and CNAME can be written to UCI; the rest are listed
-// because ExternalDNS may still send them.
+// The record types UCI can hold. ExternalDNS may send others; AdjustEndpoints
+// drops them.
 const (
 	RecordTypeA     = "A"
-	RecordTypeAAAA  = "AAAA"
 	RecordTypeCNAME = "CNAME"
-	RecordTypeTXT   = "TXT"
 )
 
 // TTL is a record TTL in seconds. Zero means "not configured", matching
 // ExternalDNS semantics.
 type TTL int64
-
-// IsConfigured reports whether a TTL was actually requested.
-func (t TTL) IsConfigured() bool { return t > 0 }
-
-// Targets are the right-hand side values of a record.
-type Targets []string
-
-// Labels carry ExternalDNS registry metadata. Unused here, but they must
-// survive a round trip.
-type Labels map[string]string
 
 // ProviderSpecificProperty is a provider-scoped key/value annotation.
 type ProviderSpecificProperty struct {
@@ -45,18 +33,18 @@ type ProviderSpecificProperty struct {
 	Value string `json:"value,omitempty"`
 }
 
-// ProviderSpecific is the collection of provider-scoped annotations.
-type ProviderSpecific []ProviderSpecificProperty
-
 // Endpoint is a single desired or observed DNS record.
+//
+// Labels carry ExternalDNS registry metadata. Unused here, but they must
+// survive a round trip.
 type Endpoint struct {
-	DNSName          string           `json:"dnsName,omitempty"`
-	Targets          Targets          `json:"targets,omitempty"`
-	RecordType       string           `json:"recordType,omitempty"`
-	SetIdentifier    string           `json:"setIdentifier,omitempty"`
-	RecordTTL        TTL              `json:"recordTTL,omitempty"`
-	Labels           Labels           `json:"labels,omitempty"`
-	ProviderSpecific ProviderSpecific `json:"providerSpecific,omitempty"`
+	DNSName          string                     `json:"dnsName,omitempty"`
+	Targets          []string                   `json:"targets,omitempty"`
+	RecordType       string                     `json:"recordType,omitempty"`
+	SetIdentifier    string                     `json:"setIdentifier,omitempty"`
+	RecordTTL        TTL                        `json:"recordTTL,omitempty"`
+	Labels           map[string]string          `json:"labels,omitempty"`
+	ProviderSpecific []ProviderSpecificProperty `json:"providerSpecific,omitempty"`
 }
 
 // Changes is one reconcile step.
@@ -71,14 +59,6 @@ type Changes struct {
 	UpdateOld []*Endpoint `json:"updateOld,omitempty"`
 	UpdateNew []*Endpoint `json:"updateNew,omitempty"`
 	Delete    []*Endpoint `json:"delete,omitempty"`
-}
-
-// Empty reports whether the change set asks for nothing.
-func (c *Changes) Empty() bool {
-	if c == nil {
-		return true
-	}
-	return len(c.Create)+len(c.UpdateOld)+len(c.UpdateNew)+len(c.Delete) == 0
 }
 
 // DomainFilter is the negotiation response served from `GET /`.

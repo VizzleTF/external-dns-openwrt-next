@@ -143,11 +143,6 @@ func (g *Gauge) Set(value float64, labelValues ...string) {
 	g.m.seriesFor(labelValues).set(value)
 }
 
-// Add adds delta to the series, which may be negative.
-func (g *Gauge) Add(delta float64, labelValues ...string) {
-	g.m.seriesFor(labelValues).add(delta)
-}
-
 func (m *metric) seriesFor(labelValues []string) *series {
 	key := strings.Join(labelValues, "\xff")
 
