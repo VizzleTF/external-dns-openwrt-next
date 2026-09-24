@@ -11,7 +11,7 @@ provider:
   webhook:
     image:
       repository: ghcr.io/vizzletf/external-dns-openwrt-next
-      tag: v0.7.0
+      tag: v0.8.0
     # No probe overrides: the chart already probes /healthz on port 8080, which
     # is where this webhook serves them. The provider API is on 8888, loopback
     # only, and the kubelet could not reach it there anyway.

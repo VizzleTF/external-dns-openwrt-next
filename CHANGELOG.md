@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.8.0
 
 A pass for over-engineering: what the code carried without needing it is gone.
 Nothing here changes what lands on the router, but several configuration
