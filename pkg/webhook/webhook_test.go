@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/metrics"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhookapi"
 )
@@ -60,7 +60,7 @@ func newServerWithBodyLimit(provider Provider, maxBodyBytes int64) http.Handler 
 func newServerWithMetrics(provider Provider, maxBodyBytes int64) (http.Handler, *metrics.Registry) {
 	mux := http.NewServeMux()
 	registry := metrics.NewRegistry()
-	hook := New(provider, logger.Discard(), registry)
+	hook := New(provider, slog.New(slog.DiscardHandler), registry)
 	hook.MaxBodyBytes = maxBodyBytes
 	hook.Register(mux)
 	return mux, registry
@@ -92,7 +92,7 @@ func do(t *testing.T, handler http.Handler, method, path, body string, headers m
 
 func TestRecordsReturnsEndpointsWithTheVersionedMediaType(t *testing.T) {
 	provider := &fakeProvider{records: []*webhookapi.Endpoint{
-		{DNSName: "a.example.com", RecordType: webhookapi.RecordTypeA, Targets: webhookapi.Targets{"1.2.3.4"}},
+		{DNSName: "a.example.com", RecordType: webhookapi.RecordTypeA, Targets: []string{"1.2.3.4"}},
 	}}
 
 	res := do(t, newServer(provider), http.MethodGet, "/records", "", map[string]string{"Accept": testMediaType})

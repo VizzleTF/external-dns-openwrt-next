@@ -25,11 +25,11 @@ func newSectionIndex(sections map[string]DNSRecord) *sectionIndex {
 }
 
 // owned returns the sections for key that this provider may modify. With
-// ownership disabled every match qualifies.
-func (i *sectionIndex) owned(key, ownershipID string, ownershipEnabled bool) []string {
+// ownership disabled (an empty ID) every match qualifies.
+func (i *sectionIndex) owned(key, ownershipID string) []string {
 	var sections []string
 	for _, section := range i.byKey[key] {
-		if ownershipEnabled && section.owner != ownershipID {
+		if ownershipID != "" && section.owner != ownershipID {
 			continue
 		}
 		sections = append(sections, section.name)

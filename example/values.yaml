@@ -54,8 +54,6 @@ provider:
         value: "443"
       - name: PROVIDER_OPENWRT_LUCIRPC_SSL
         value: "true"
-      - name: PROVIDER_OPENWRT_LUCIRPC_RPC_ID
-        value: "1"
       - name: PROVIDER_OPENWRT_LUCIRPC_TIMEOUT
         value: "15"
       - name: PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY

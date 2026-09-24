@@ -132,7 +132,7 @@ Set with `PROVIDER_OPENWRT_RELOADSTRATEGY`:
 | Value | Behaviour |
 | ----- | --------- |
 | `restart` (default) | Runs `/etc/init.d/dnsmasq restart` over the `rpc/sys` endpoint. The only strategy that applies **both** record types. |
-| `reload` | Runs `/etc/init.d/dnsmasq reload`. **Verified ineffective where dnsmasq runs under ujail** (see below), and never applies CNAMEs. `dnsmasq` is accepted as a legacy alias. |
+| `reload` | Runs `/etc/init.d/dnsmasq reload`. **Verified ineffective where dnsmasq runs under ujail** (see below), and never applies CNAMEs. |
 | `uci-apply` | Calls `uci apply` with no arguments. Commits and applies **every** pending UCI config, not just `dhcp`, so anything an admin left staged is applied too. Use when the RPC user cannot reach `rpc/sys`. |
 | `none` | Commit only. Records land in `/etc/config/dhcp` but dnsmasq keeps serving the previous set. |
 

@@ -44,15 +44,7 @@ func bind(structValue reflect.Value, path []string) error {
 			continue
 		}
 
-		name := field.Tag.Get("mapstructure")
-		if name == "-" {
-			continue
-		}
-		if name == "" {
-			name = field.Name
-		}
-
-		fieldPath := append(append([]string{}, path...), name)
+		fieldPath := append(append([]string{}, path...), field.Tag.Get("mapstructure"))
 
 		if err := bindField(structValue.Field(i), fieldPath); err != nil {
 			return err
@@ -106,20 +98,6 @@ func setLeaf(value reflect.Value, path []string) error {
 		}
 		value.SetInt(parsed)
 
-	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		parsed, err := strconv.ParseUint(raw, 10, 64)
-		if err != nil {
-			return fmt.Errorf("%s: %w", key, err)
-		}
-		value.SetUint(parsed)
-
-	case reflect.Float32, reflect.Float64:
-		parsed, err := strconv.ParseFloat(raw, 64)
-		if err != nil {
-			return fmt.Errorf("%s: %w", key, err)
-		}
-		value.SetFloat(parsed)
-
 	default:
 		return fmt.Errorf("%s: unsupported configuration type %s", key, value.Kind())
 	}
@@ -129,8 +107,5 @@ func setLeaf(value reflect.Value, path []string) error {
 
 // envKey renders the environment variable name for a field path.
 func envKey(path []string) string {
-	key := strings.Join(path, "_")
-	key = strings.ReplaceAll(key, "-", "_")
-	key = strings.ReplaceAll(key, ".", "_")
-	return strings.ToUpper(key)
+	return strings.ToUpper(strings.Join(path, "_"))
 }

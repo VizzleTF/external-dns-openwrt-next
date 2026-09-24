@@ -1,7 +1,5 @@
 package lucirpc
 
-//go:generate mockgen -destination=../../internal/mocks/lucirpc/lucirpc.go -package=mocks . LuciRPC
-
 import (
 	"bytes"
 	"context"
@@ -78,7 +76,7 @@ func (c *lucirpc) setToken(token string) {
 	c.token = token
 }
 
-func New(config *Config, log *slog.Logger) (LuciRPC, error) {
+func New(config *Config, log *slog.Logger) LuciRPC {
 	timeout := time.Duration(config.Timeout) * time.Second
 	httpClient := &http.Client{
 		// The dial timeout alone only bounds connection setup. Without a
@@ -100,7 +98,7 @@ func New(config *Config, log *slog.Logger) (LuciRPC, error) {
 		config:     config,
 		httpClient: httpClient,
 		log:        log,
-	}, nil
+	}
 }
 
 func (c *lucirpc) Uci(ctx context.Context, method string, params []string) (string, error) {
@@ -119,8 +117,8 @@ func (c *lucirpc) auth(ctx context.Context) error {
 	}
 
 	// OpenWRT JSON RPC response of wrong username and password
-	// {"id":1,"result":null,"error":null}
-	if token == "null" {
+	// {"id":1,"result":null,"error":null}, which rpc() returns as "".
+	if token == "" {
 		return ErrRpcLoginFail
 	}
 
@@ -130,7 +128,7 @@ func (c *lucirpc) auth(ctx context.Context) error {
 
 func (c *lucirpc) rpc(ctx context.Context, path, method string, params []string) (string, error) {
 	data, err := json.Marshal(Payload{
-		ID:     c.config.RpcID,
+		ID:     1,
 		Method: method,
 		Params: params,
 	})

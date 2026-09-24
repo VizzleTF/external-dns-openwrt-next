@@ -1,18 +1,16 @@
 package router
 
 import (
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/metrics"
 )
 
-type fakeHandler struct{}
-
-func (fakeHandler) Register(mux *http.ServeMux) {
+func fakeHandler(mux *http.ServeMux) {
 	mux.HandleFunc("GET /records", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -22,7 +20,7 @@ func TestMetricsAreServedOnTheObservabilityListener(t *testing.T) {
 	config := DefaultConfig()
 	registry := metrics.NewRegistry()
 	metrics.Build(registry)
-	r := New(config, logger.Discard(), registry, fakeHandler{})
+	r := New(config, slog.New(slog.DiscardHandler), registry, fakeHandler)
 
 	res := httptest.NewRecorder()
 	r.health.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, config.MetricsPath, nil))
@@ -49,7 +47,7 @@ func TestMetricsAreServedOnTheObservabilityListener(t *testing.T) {
 func TestAnEmptyMetricsPathSwitchesTheEndpointOff(t *testing.T) {
 	config := DefaultConfig()
 	config.MetricsPath = ""
-	r := New(config, logger.Discard(), metrics.NewRegistry(), fakeHandler{})
+	r := New(config, slog.New(slog.DiscardHandler), metrics.NewRegistry(), fakeHandler)
 
 	res := httptest.NewRecorder()
 	r.health.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/metrics", nil))
@@ -61,7 +59,7 @@ func TestAnEmptyMetricsPathSwitchesTheEndpointOff(t *testing.T) {
 
 func TestApiRequestsAreCountedByRoute(t *testing.T) {
 	registry := metrics.NewRegistry()
-	r := New(DefaultConfig(), logger.Discard(), registry, fakeHandler{})
+	r := New(DefaultConfig(), slog.New(slog.DiscardHandler), registry, fakeHandler)
 
 	r.api.Handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/records", nil))
 	// An unrouted path must not mint a series of its own, or a scanner could
@@ -103,7 +101,7 @@ func TestTheApiListensOnLoopbackAndHealthOnEveryInterface(t *testing.T) {
 	// The provider API can rewrite the router's DNS and authenticates nobody,
 	// so it must not be reachable on the pod IP; the kubelet, on the other
 	// hand, probes through the pod IP and would fail against loopback.
-	r := New(DefaultConfig(), logger.Discard(), metrics.NewRegistry(), fakeHandler{})
+	r := New(DefaultConfig(), slog.New(slog.DiscardHandler), metrics.NewRegistry(), fakeHandler)
 
 	if got, want := r.api.Addr, "127.0.0.1:8888"; got != want {
 		t.Errorf("api address: got %q, want %q", got, want)
@@ -115,7 +113,7 @@ func TestTheApiListensOnLoopbackAndHealthOnEveryInterface(t *testing.T) {
 
 func TestHealthAnswersOnItsOwnListenerOnly(t *testing.T) {
 	config := DefaultConfig()
-	r := New(config, logger.Discard(), metrics.NewRegistry(), fakeHandler{})
+	r := New(config, slog.New(slog.DiscardHandler), metrics.NewRegistry(), fakeHandler)
 
 	res := httptest.NewRecorder()
 	r.health.Handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, config.HealthCheckPath, nil))

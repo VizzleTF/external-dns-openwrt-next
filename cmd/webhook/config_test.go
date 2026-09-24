@@ -27,7 +27,6 @@ func TestEnvironmentVariableNames(t *testing.T) {
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_HOSTNAME", "10.0.0.1")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_PORT", "8443")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_SSL", "false")
-	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_RPC_ID", "7")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_TIMEOUT", "30")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY", "true")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME", "root")
@@ -60,7 +59,6 @@ func TestEnvironmentVariableNames(t *testing.T) {
 		{"PROVIDER_OPENWRT_LUCIRPC_HOSTNAME", rpc.Hostname, "10.0.0.1"},
 		{"PROVIDER_OPENWRT_LUCIRPC_PORT", rpc.Port, 8443},
 		{"PROVIDER_OPENWRT_LUCIRPC_SSL", rpc.SSL, false},
-		{"PROVIDER_OPENWRT_LUCIRPC_RPC_ID", rpc.RpcID, 7},
 		{"PROVIDER_OPENWRT_LUCIRPC_TIMEOUT", rpc.Timeout, 30},
 		{"PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY", rpc.InsecureSkipVerify, true},
 		{"PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME", rpc.Auth.Username, "root"},

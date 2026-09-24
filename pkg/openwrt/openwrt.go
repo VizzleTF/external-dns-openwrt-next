@@ -9,8 +9,6 @@ import (
 	"log/slog"
 )
 
-//go:generate mockgen -destination=../../internal/mocks/openwrt/openwrt.go -package=mocks . OpenWRT
-
 const (
 	dnsmasqRestartCommand = "/etc/init.d/dnsmasq restart"
 	dnsmasqReloadCommand  = "/etc/init.d/dnsmasq reload"
@@ -51,12 +49,7 @@ func New(cfg *Config, log *slog.Logger) (OpenWRT, error) {
 		return nil, err
 	}
 
-	lrcp, err := lucirpc.New(cfg.LuciRPC, log)
-	if err != nil {
-		return nil, err
-	}
-
-	if cfg.OwnershipEnabled() {
+	if cfg.OwnershipID != "" {
 		log.Info("ownership enabled, only marked records are managed",
 			slog.String("option", option), slog.String("id", cfg.OwnershipID),
 			slog.Bool("adopt_existing", cfg.AdoptExisting))
@@ -65,7 +58,7 @@ func New(cfg *Config, log *slog.Logger) (OpenWRT, error) {
 	}
 
 	return &openWRT{
-		lucirpc:         lrcp,
+		lucirpc:         lucirpc.New(cfg.LuciRPC, log),
 		log:             log,
 		reloadStrategy:  cfg.ReloadStrategy,
 		ownershipID:     cfg.OwnershipID,
@@ -134,18 +127,18 @@ func (o *openWRT) parseSection(options map[string]any) (DNSRecord, bool) {
 	case sectionTypeDomain:
 		record.Type = RecordTypeA
 		record.Name = stringOption(options, optionName)
-		record.IP = stringOption(options, optionIP)
+		record.Value = stringOption(options, optionIP)
 	case sectionTypeCName:
 		record.Type = RecordTypeCNAME
-		record.CName = stringOption(options, optionCName)
-		record.Target = stringOption(options, optionTarget)
+		record.Name = stringOption(options, optionCName)
+		record.Value = stringOption(options, optionTarget)
 	default:
 		return DNSRecord{}, false
 	}
 
 	// A `domain` section may carry a list of names, which this provider cannot
 	// represent as a single record. Skip rather than mangle it.
-	if record.DNSName() == "" || record.Value() == "" {
+	if record.Name == "" || record.Value == "" {
 		o.log.Debug("skipping section that is not a single-valued record")
 		return DNSRecord{}, false
 	}
@@ -216,7 +209,7 @@ func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) 
 // removeRecord deletes every owned section matching the record. Sections that
 // belong to someone else are never touched.
 func (o *openWRT) removeRecord(ctx context.Context, index *sectionIndex, record DNSRecord) (int, error) {
-	sections := index.owned(record.Key(), o.ownershipID, o.ownershipEnabled())
+	sections := index.owned(record.Key(), o.ownershipID)
 	if len(sections) == 0 {
 		o.log.Info("record already absent, nothing to delete", recordFields(record)...)
 		return 0, nil
@@ -224,7 +217,7 @@ func (o *openWRT) removeRecord(ctx context.Context, index *sectionIndex, record 
 
 	for _, section := range sections {
 		if _, err := o.lucirpc.Uci(ctx, "delete", []string{uciConfig, section}); err != nil {
-			return 0, fmt.Errorf("delete %s (%s): %w", record.DNSName(), section, err)
+			return 0, fmt.Errorf("delete %s (%s): %w", record.Name, section, err)
 		}
 		index.drop(record.Key(), section)
 	}
@@ -242,7 +235,7 @@ func (o *openWRT) addRecord(ctx context.Context, index *sectionIndex, record DNS
 
 	key := record.Key()
 
-	if len(index.owned(key, o.ownershipID, o.ownershipEnabled())) > 0 {
+	if len(index.owned(key, o.ownershipID)) > 0 {
 		o.log.Info("record already present, nothing to add", recordFields(record)...)
 		return 0, nil
 	}
@@ -252,7 +245,7 @@ func (o *openWRT) addRecord(ctx context.Context, index *sectionIndex, record DNS
 	if o.ownershipEnabled() && o.adoptExisting {
 		if section, ok := index.firstUnowned(key); ok {
 			if err := o.setOwner(ctx, section); err != nil {
-				return 0, fmt.Errorf("adopt %s (%s): %w", record.DNSName(), section, err)
+				return 0, fmt.Errorf("adopt %s (%s): %w", record.Name, section, err)
 			}
 			index.markOwned(key, section, o.ownershipID)
 			o.log.Info("adopted existing record",
@@ -263,7 +256,7 @@ func (o *openWRT) addRecord(ctx context.Context, index *sectionIndex, record DNS
 
 	section, err := o.createSection(ctx, record)
 	if err != nil {
-		return 0, fmt.Errorf("add %s: %w", record.DNSName(), err)
+		return 0, fmt.Errorf("add %s: %w", record.Name, err)
 	}
 
 	index.add(key, section, o.ownershipID)
@@ -272,23 +265,15 @@ func (o *openWRT) addRecord(ctx context.Context, index *sectionIndex, record DNS
 }
 
 func (o *openWRT) createSection(ctx context.Context, record DNSRecord) (string, error) {
-	var sectionType string
-	options := make([][2]string, 0, 3)
-
 	// What goes onto the router is the canonical spelling, so a later lookup
 	// finds it whatever case the annotation that asked for it used.
 	record = record.canonical()
 
-	switch record.Type {
-	case RecordTypeA:
-		sectionType = sectionTypeDomain
-		options = append(options, [2]string{optionName, record.Name}, [2]string{optionIP, record.IP})
-	case RecordTypeCNAME:
-		sectionType = sectionTypeCName
-		options = append(options, [2]string{optionCName, record.CName}, [2]string{optionTarget, record.Target})
-	default:
-		return "", fmt.Errorf("invalid record type: %s", record.Type)
+	sectionType, nameOption, valueOption := sectionTypeDomain, optionName, optionIP
+	if record.Type == RecordTypeCNAME {
+		sectionType, nameOption, valueOption = sectionTypeCName, optionCName, optionTarget
 	}
+	options := [][2]string{{nameOption, record.Name}, {valueOption, record.Value}}
 
 	if o.ownershipEnabled() {
 		options = append(options, [2]string{o.ownershipOption, o.ownershipID})
@@ -319,7 +304,7 @@ func (o *openWRT) setOwner(ctx context.Context, section string) error {
 // /var/etc/dnsmasq.conf.* nor signals the daemon, so without this step records
 // stay invisible until something else restarts the service.
 func (o *openWRT) reload(ctx context.Context) error {
-	switch normaliseReloadStrategy(o.reloadStrategy) {
+	switch o.reloadStrategy {
 	case ReloadStrategyNone:
 		o.log.Debug("reload disabled, dnsmasq keeps serving the previous configuration")
 		return nil
@@ -362,8 +347,8 @@ func (o *openWRT) reload(ctx context.Context) error {
 
 func recordFields(record DNSRecord) []any {
 	return []any{
-		slog.String("name", record.DNSName()),
+		slog.String("name", record.Name),
 		slog.String("type", record.Type),
-		slog.String("value", record.Value()),
+		slog.String("value", record.Value),
 	}
 }

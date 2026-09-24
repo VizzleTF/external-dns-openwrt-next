@@ -2,219 +2,133 @@ package lucirpc
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"testing"
-
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
 )
 
-func TestLuciRPC(t *testing.T) {
-	RegisterFailHandler(Fail)
-	RunSpecs(t, "Luci RPC Suite")
-	defer GinkgoRecover()
+// newTestClient points a client at a local server serving mux over plain HTTP.
+func newTestClient(t *testing.T, mux *http.ServeMux) *lucirpc {
+	t.Helper()
+	ts := httptest.NewServer(mux)
+	t.Cleanup(ts.Close)
+
+	u, err := url.Parse(ts.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(u.Port())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	config := DefaultConfig()
+	config.SSL = false
+	config.Hostname = u.Hostname()
+	config.Port = port
+
+	return &lucirpc{config: config, log: slog.New(slog.DiscardHandler), httpClient: ts.Client()}
 }
 
-var _ = Describe("Luci RPC", func() {
-	var ctx context.Context
+func respond(status int, body string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}
+}
 
-	BeforeEach(func() {
-		ctx = context.Background()
+func TestAuthStoresTheToken(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+authPath, respond(http.StatusAccepted, `{"result":"foobar"}`))
+	client := newTestClient(t, mux)
+
+	if err := client.auth(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if client.token != "foobar" {
+		t.Errorf("token: got %q", client.token)
+	}
+}
+
+func TestAuthFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   error
+	}{
+		{"unauthorized", http.StatusUnauthorized, "", ErrHttpUnauthorized},
+		{"forbidden", http.StatusForbidden, "", ErrHttpForbidden},
+		// What LuCI answers to a wrong username or password.
+		{"wrong credentials", http.StatusOK, `{"id":1,"result":null,"error":null}`, ErrRpcLoginFail},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc(authPath, respond(tc.status, tc.body))
+			client := newTestClient(t, mux)
+
+			if err := client.auth(context.Background()); !errors.Is(err, tc.want) {
+				t.Errorf("got %v, want %v", err, tc.want)
+			}
+			if client.token != "" {
+				t.Errorf("token: got %q, want none", client.token)
+			}
+		})
+	}
+}
+
+func TestAuthReportsAServerError(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(authPath, respond(http.StatusInternalServerError, ""))
+	client := newTestClient(t, mux)
+
+	err := client.auth(context.Background())
+	if err == nil || err.Error() != "http status code: 500" {
+		t.Errorf("got %v", err)
+	}
+}
+
+func TestUciReauthenticatesAndRetries(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(authPath, respond(http.StatusOK, `{"result":"foobar"}`))
+
+	rejected := false
+	mux.HandleFunc(uciPath, func(w http.ResponseWriter, r *http.Request) {
+		if !rejected {
+			rejected = true
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if r.RequestURI != uciPath+"?auth=foobar" {
+			t.Errorf("request URI: got %q", r.RequestURI)
+		}
+		respond(http.StatusOK, `{"result":"helloworld"}`)(w, r)
 	})
+	client := newTestClient(t, mux)
 
-	Context("auth", func() {
-		It("should be login", func() {
-			mux := http.NewServeMux()
-			ts := httptest.NewServer(mux)
-			defer ts.Close()
-			u, err := url.Parse(ts.URL)
-			Expect(err).To(BeNil())
-			port, err := strconv.Atoi(u.Port())
-			Expect(err).To(BeNil())
-			hostname := u.Hostname()
+	resp, err := client.Uci(context.Background(), "get", []string{"network.lan.ipaddr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp != "helloworld" {
+		t.Errorf("response: got %q", resp)
+	}
+	if !rejected {
+		t.Error("the first call was never rejected, so re-authentication was not exercised")
+	}
+}
 
-			config := DefaultConfig()
-			Expect(config).ToNot(BeNil())
-			config.SSL = false
-			config.Hostname = hostname
-			config.Port = port
+func TestUciSurfacesALoginFailureOnReauthentication(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(authPath, respond(http.StatusOK, `{"id":1,"result":null,"error":null}`))
+	mux.HandleFunc(uciPath, respond(http.StatusForbidden, ""))
+	client := newTestClient(t, mux)
 
-			client := &lucirpc{
-				config:     config,
-				log:        logger.Discard(),
-				httpClient: ts.Client(),
-			}
-			Expect(client).ToNot(BeNil())
-
-			mux.HandleFunc(authPath, func(w http.ResponseWriter, r *http.Request) {
-				Expect(r.Method).To(Equal(http.MethodPost))
-				Expect(r.URL.Path).To(Equal(authPath))
-				w.WriteHeader(http.StatusAccepted)
-				_, err = w.Write([]byte(`{"result":"foobar"}`))
-				Expect(err).To(BeNil())
-			})
-
-			err = client.auth(ctx)
-			Expect(err).To(BeNil())
-			Expect(client.token).To(Equal("foobar"))
-		})
-
-		It("should be unauthorized", func() {
-			mux := http.NewServeMux()
-			ts := httptest.NewServer(mux)
-			defer ts.Close()
-			u, err := url.Parse(ts.URL)
-			Expect(err).To(BeNil())
-			port, err := strconv.Atoi(u.Port())
-			Expect(err).To(BeNil())
-			hostname := u.Hostname()
-
-			config := DefaultConfig()
-			Expect(config).ToNot(BeNil())
-			config.SSL = false
-			config.Hostname = hostname
-			config.Port = port
-
-			client := &lucirpc{
-				config:     config,
-				log:        logger.Discard(),
-				httpClient: ts.Client(),
-			}
-			Expect(client).ToNot(BeNil())
-
-			mux.HandleFunc(authPath, func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusUnauthorized)
-			})
-
-			err = client.auth(ctx)
-			Expect(err).To(Equal(ErrHttpUnauthorized))
-			Expect(client.token).To(Equal(""))
-		})
-
-		It("should be forbidden", func() {
-			mux := http.NewServeMux()
-			ts := httptest.NewServer(mux)
-			defer ts.Close()
-			u, err := url.Parse(ts.URL)
-			Expect(err).To(BeNil())
-			port, err := strconv.Atoi(u.Port())
-			Expect(err).To(BeNil())
-			hostname := u.Hostname()
-
-			config := DefaultConfig()
-			Expect(config).ToNot(BeNil())
-			config.SSL = false
-			config.Hostname = hostname
-			config.Port = port
-
-			client := &lucirpc{
-				config:     config,
-				log:        logger.Discard(),
-				httpClient: ts.Client(),
-			}
-			Expect(client).ToNot(BeNil())
-
-			mux.HandleFunc(authPath, func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusForbidden)
-			})
-
-			err = client.auth(ctx)
-			Expect(err).To(Equal(ErrHttpForbidden))
-			Expect(client.token).To(Equal(""))
-		})
-
-		It("should fail", func() {
-			mux := http.NewServeMux()
-			ts := httptest.NewServer(mux)
-			defer ts.Close()
-			u, err := url.Parse(ts.URL)
-			Expect(err).To(BeNil())
-			port, err := strconv.Atoi(u.Port())
-			Expect(err).To(BeNil())
-			hostname := u.Hostname()
-
-			config := DefaultConfig()
-			Expect(config).ToNot(BeNil())
-			config.SSL = false
-			config.Hostname = hostname
-			config.Port = port
-
-			client := &lucirpc{
-				config:     config,
-				log:        logger.Discard(),
-				httpClient: ts.Client(),
-			}
-			Expect(client).ToNot(BeNil())
-
-			mux.HandleFunc(authPath, func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusInternalServerError)
-			})
-
-			err = client.auth(ctx)
-			Expect(err).To(Equal(fmt.Errorf("http status code: 500")))
-		})
-
-	})
-
-	Context("uci", func() {
-		It("should get", func() {
-			mux := http.NewServeMux()
-			ts := httptest.NewServer(mux)
-			defer ts.Close()
-			u, err := url.Parse(ts.URL)
-			Expect(err).To(BeNil())
-			port, err := strconv.Atoi(u.Port())
-			Expect(err).To(BeNil())
-			hostname := u.Hostname()
-
-			config := DefaultConfig()
-			Expect(config).ToNot(BeNil())
-			config.Hostname = hostname
-			config.Port = port
-			config.SSL = false
-
-			client := &lucirpc{
-				config:     config,
-				log:        logger.Discard(),
-				httpClient: ts.Client(),
-			}
-			Expect(client).ToNot(BeNil())
-
-			expectedToken := "foobar"
-			authCalled := false
-			mux.HandleFunc(authPath, func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusOK)
-				_, err = w.Write([]byte(`{"result":"` + expectedToken + `"}`))
-				Expect(err).To(BeNil())
-			})
-
-			expectedResp := "helloworld"
-			mux.HandleFunc(uciPath, func(w http.ResponseWriter, r *http.Request) {
-				// auth should be called
-				if !authCalled {
-					authCalled = true
-					w.WriteHeader(http.StatusUnauthorized)
-					return
-				}
-
-				Expect(r.URL.Path).To(Equal(uciPath))
-				Expect(r.RequestURI).To(Equal(uciPath + "?auth=" + expectedToken))
-
-				w.WriteHeader(http.StatusOK)
-				_, err = w.Write([]byte(`{"result":"` + expectedResp + `"}`))
-				Expect(err).To(BeNil())
-			})
-
-			resp, err := client.Uci(ctx, "get", []string{"network.lan.ipaddr"})
-			Expect(err).To(BeNil())
-			Expect(resp).To(Equal(expectedResp))
-			Expect(authCalled).To(BeTrue())
-			Expect(client.token).To(Equal(expectedToken))
-		})
-	})
-})
+	if _, err := client.Uci(context.Background(), "get_all", []string{"dhcp"}); !errors.Is(err, ErrRpcLoginFail) {
+		t.Errorf("got %v, want %v", err, ErrRpcLoginFail)
+	}
+}

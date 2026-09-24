@@ -20,6 +20,9 @@ const (
 
 	contentTypePlaintext = "text/plain"
 
+	// mediaType is the only version of the webhook contract that exists.
+	mediaType = "application/external.dns.webhook+json;version=1"
+
 	// DefaultMaxBodyBytes mirrors the ExternalDNS default for
 	// --webhook-provider-max-body-size. The controller caps what it reads from
 	// this webhook; the cap here is the other half of that bargain, so a body
@@ -110,7 +113,7 @@ func (w *Webhook) Records(rw http.ResponseWriter, req *http.Request) {
 
 	records, err := w.provider.Records(req.Context())
 	if err != nil {
-		w.fail(rw, "error getting records", err)
+		w.reject(rw, http.StatusInternalServerError, "error getting records", slog.Any("error", err))
 		return
 	}
 
@@ -142,7 +145,7 @@ func (w *Webhook) ApplyChanges(rw http.ResponseWriter, req *http.Request) {
 
 	if err := w.provider.ApplyChanges(req.Context(), &changes); err != nil {
 		w.metrics.applied.Inc("error")
-		w.fail(rw, "error applying changes", err)
+		w.reject(rw, http.StatusInternalServerError, "error applying changes", slog.Any("error", err))
 		return
 	}
 
@@ -164,7 +167,7 @@ func (w *Webhook) AdjustEndpoints(rw http.ResponseWriter, req *http.Request) {
 
 	adjusted, err := w.provider.AdjustEndpoints(endpoints)
 	if err != nil {
-		w.fail(rw, "error adjusting endpoints", err)
+		w.reject(rw, http.StatusInternalServerError, "error adjusting endpoints", slog.Any("error", err))
 		return
 	}
 
@@ -214,14 +217,14 @@ func droppedByType(before, after []*webhookapi.Endpoint) map[string]int {
 func (w *Webhook) requireMediaType(rw http.ResponseWriter, req *http.Request, header string) bool {
 	value := req.Header.Get(header)
 	if value == "" {
-		w.reject(rw, http.StatusNotAcceptable, "client must provide a "+header+" header", header, value)
+		w.reject(rw, http.StatusNotAcceptable, "client must provide a "+header+" header",
+			slog.String("header", header))
 		return false
 	}
 
-	// Only one media type version exists, so the parsed value is not needed.
-	if _, err := checkAndGetMediaTypeHeaderValue(value); err != nil {
-		w.reject(rw, http.StatusUnsupportedMediaType,
-			"client must provide a valid versioned media type", header, value)
+	if value != mediaType {
+		w.reject(rw, http.StatusUnsupportedMediaType, "client must provide a valid versioned media type",
+			slog.String("header", header), slog.String("value", value))
 		return false
 	}
 
@@ -240,12 +243,11 @@ func (w *Webhook) decode(rw http.ResponseWriter, req *http.Request, target any) 
 		// tells it the request will never fit, where 400 says it was malformed.
 		var toolarge *http.MaxBytesError
 		if errors.As(err, &toolarge) {
-			w.reject(rw, http.StatusRequestEntityTooLarge, "request body too large", "", "")
+			w.reject(rw, http.StatusRequestEntityTooLarge, "request body too large")
 			return false
 		}
 
-		w.log.Error("error decoding request body", slog.Any("error", err))
-		w.reject(rw, http.StatusBadRequest, "error decoding request body", "", "")
+		w.reject(rw, http.StatusBadRequest, "error decoding request body", slog.Any("error", err))
 		return false
 	}
 
@@ -253,7 +255,7 @@ func (w *Webhook) decode(rw http.ResponseWriter, req *http.Request, target any) 
 }
 
 func (w *Webhook) writeJSON(rw http.ResponseWriter, status int, body any) {
-	rw.Header().Set(headerContentType, string(mediaTypeVersion1))
+	rw.Header().Set(headerContentType, mediaType)
 	rw.Header().Set(headerVary, headerContentType)
 	rw.WriteHeader(status)
 
@@ -263,20 +265,13 @@ func (w *Webhook) writeJSON(rw http.ResponseWriter, status int, body any) {
 	}
 }
 
-func (w *Webhook) reject(rw http.ResponseWriter, status int, message, header, value string) {
-	w.log.Error(message, slog.String("header", header), slog.String("value", value))
+// reject logs the failure and answers it with a plain-text body.
+func (w *Webhook) reject(rw http.ResponseWriter, status int, message string, attrs ...any) {
+	w.log.Error(message, attrs...)
 
 	rw.Header().Set(headerContentType, contentTypePlaintext)
 	rw.WriteHeader(status)
 	// ExternalDNS drains the body before reusing the connection, so always
 	// write one.
-	_, _ = rw.Write([]byte(message))
-}
-
-func (w *Webhook) fail(rw http.ResponseWriter, message string, err error) {
-	w.log.Error(message, slog.Any("error", err))
-
-	rw.Header().Set(headerContentType, contentTypePlaintext)
-	rw.WriteHeader(http.StatusInternalServerError)
 	_, _ = rw.Write([]byte(message))
 }

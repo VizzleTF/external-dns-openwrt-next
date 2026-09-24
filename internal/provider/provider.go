@@ -41,17 +41,6 @@ func New(cfg *Config, log *slog.Logger) (*Provider, error) {
 // the same records. Only UpdateNew must end up on the router; UpdateOld is
 // there to say what to withdraw.
 func (p *Provider) ApplyChanges(ctx context.Context, changes *webhookapi.Changes) error {
-	if changes.Empty() {
-		p.log.Debug("empty change set")
-		return nil
-	}
-
-	p.log.Debug("apply changes",
-		slog.Int("create", len(changes.Create)),
-		slog.Int("update_old", len(changes.UpdateOld)),
-		slog.Int("update_new", len(changes.UpdateNew)),
-		slog.Int("delete", len(changes.Delete)))
-
 	remove := p.endpoints2DNSRecords(changes.Delete)
 	remove = append(remove, p.endpoints2DNSRecords(changes.UpdateOld)...)
 
@@ -62,11 +51,6 @@ func (p *Provider) ApplyChanges(ctx context.Context, changes *webhookapi.Changes
 	// in both lists. Cancelling them out avoids deleting and immediately
 	// re-adding the same UCI section on every run.
 	remove, add = cancelOut(remove, add)
-
-	if len(remove) == 0 && len(add) == 0 {
-		p.log.Debug("no effective changes")
-		return nil
-	}
 
 	return p.openwrt.ApplyDNSRecords(ctx, remove, add)
 }
@@ -97,7 +81,7 @@ func (p *Provider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) ([]*webhook
 			continue
 		}
 
-		if ep.RecordTTL.IsConfigured() {
+		if ep.RecordTTL > 0 {
 			p.log.Debug("dropping per-record TTL, dnsmasq serves these from its global local_ttl",
 				slog.String("name", ep.DNSName), slog.Int64("ttl", int64(ep.RecordTTL)))
 			ep.RecordTTL = 0
@@ -176,12 +160,12 @@ func (p *Provider) dnsRecords2Endpoints(dnsRecords map[string]openwrt.DNSRecord)
 			continue
 		}
 
-		k := key{name: openwrt.CanonicalName(dnsRecord.DNSName()), recordType: dnsRecord.Type}
+		k := key{name: openwrt.CanonicalName(dnsRecord.Name), recordType: dnsRecord.Type}
 		// Duplicate targets are reported as they are, not deduplicated: two
 		// sections saying the same thing is a change the plan should ask this
 		// provider to correct, and it does — the update deletes both and writes
 		// one back.
-		grouped[k] = append(grouped[k], dnsRecord.Value())
+		grouped[k] = append(grouped[k], dnsRecord.Value)
 	}
 
 	endpoints := make([]*webhookapi.Endpoint, 0, len(grouped))
@@ -192,7 +176,7 @@ func (p *Provider) dnsRecords2Endpoints(dnsRecords map[string]openwrt.DNSRecord)
 			DNSName:    k.name,
 			RecordType: k.recordType,
 			RecordTTL:  defaultTTL,
-			Targets:    webhookapi.Targets(targets),
+			Targets:    targets,
 		})
 	}
 
@@ -221,25 +205,20 @@ func (p *Provider) endpoints2DNSRecords(endpoints []*webhookapi.Endpoint) []open
 			continue
 		}
 
+		var recordType string
+		switch ep.RecordType {
+		case webhookapi.RecordTypeA:
+			recordType = openwrt.RecordTypeA
+		case webhookapi.RecordTypeCNAME:
+			recordType = openwrt.RecordTypeCNAME
+		default:
+			p.log.Debug("skipping unsupported record type",
+				slog.String("name", ep.DNSName), slog.String("type", ep.RecordType))
+			continue
+		}
+
 		for _, target := range ep.Targets {
-			var dnsRecord openwrt.DNSRecord
-
-			switch ep.RecordType {
-			case webhookapi.RecordTypeA:
-				dnsRecord.Type = openwrt.RecordTypeA
-				dnsRecord.Name = ep.DNSName
-				dnsRecord.IP = target
-			case webhookapi.RecordTypeCNAME:
-				dnsRecord.Type = openwrt.RecordTypeCNAME
-				dnsRecord.CName = ep.DNSName
-				dnsRecord.Target = target
-			default:
-				p.log.Debug("skipping unsupported record type",
-					slog.String("name", ep.DNSName), slog.String("type", ep.RecordType))
-				continue
-			}
-
-			dnsRecords = append(dnsRecords, dnsRecord)
+			dnsRecords = append(dnsRecords, openwrt.DNSRecord{Type: recordType, Name: ep.DNSName, Value: target})
 		}
 	}
 

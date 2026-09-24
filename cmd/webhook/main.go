@@ -44,7 +44,7 @@ func run() error {
 	registry := metrics.NewRegistry()
 	metrics.Build(registry)
 
-	srv := router.New(cfg.Router, log, registry, webhook.New(dnsProvider, log, registry))
+	srv := router.New(cfg.Router, log, registry, webhook.New(dnsProvider, log, registry).Register)
 
 	// Buffered: a signal arriving before the receive must not be dropped.
 	serverErr := make(chan error, 1)

@@ -32,10 +32,6 @@ const (
 	// for routers where dnsmasq is not jailed, and it never applies CNAMEs.
 	ReloadStrategyReload = "reload"
 
-	// legacyReloadStrategyDnsmasq is the old name for ReloadStrategyReload,
-	// accepted so an outdated config does not fail the provider outright.
-	legacyReloadStrategyDnsmasq = "dnsmasq"
-
 	// ReloadStrategyUciApply calls `uci apply` with no arguments. It commits
 	// and applies EVERY pending UCI config, not just dhcp, so anything an
 	// admin left staged on the router is applied too. Use it when the RPC user
@@ -47,14 +43,6 @@ const (
 	// until something else restarts it.
 	ReloadStrategyNone = "none"
 )
-
-// normaliseReloadStrategy resolves aliases.
-func normaliseReloadStrategy(strategy string) string {
-	if strategy == legacyReloadStrategyDnsmasq {
-		return ReloadStrategyReload
-	}
-	return strategy
-}
 
 // DefaultOwnershipOption is the UCI option used to mark records this provider
 // owns. UCI section handlers read only the options they know — `dhcp_domain_add`
@@ -100,11 +88,6 @@ func DefaultConfig() *Config {
 	}
 }
 
-// OwnershipEnabled reports whether the provider is scoped to its own records.
-func (c *Config) OwnershipEnabled() bool {
-	return c.OwnershipID != ""
-}
-
 // uciOptionName matches what UCI accepts as an option name. A value outside
 // this set is rejected by `uci set` at write time, which would otherwise only
 // surface on the first record the provider tries to create.
@@ -121,7 +104,7 @@ func validateOwnershipOption(option string) error {
 }
 
 func validateReloadStrategy(strategy string) error {
-	switch normaliseReloadStrategy(strategy) {
+	switch strategy {
 	case ReloadStrategyRestart, ReloadStrategyReload, ReloadStrategyUciApply, ReloadStrategyNone:
 		return nil
 	default:
