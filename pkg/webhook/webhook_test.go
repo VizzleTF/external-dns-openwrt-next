@@ -22,9 +22,8 @@ type fakeProvider struct {
 	adjusted []*webhookapi.Endpoint
 	// adjustTo, when set, is what AdjustEndpoints returns — the way a test
 	// stages a provider dropping what it cannot represent.
-	adjustTo  []*webhookapi.Endpoint
-	failWith  error
-	domainFil webhookapi.DomainFilter
+	adjustTo []*webhookapi.Endpoint
+	failWith error
 }
 
 func (f *fakeProvider) Records(context.Context) ([]*webhookapi.Endpoint, error) {
@@ -43,8 +42,6 @@ func (f *fakeProvider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) []*webh
 	}
 	return endpoints
 }
-
-func (f *fakeProvider) GetDomainFilter() webhookapi.DomainFilter { return f.domainFil }
 
 func newServer(provider Provider) http.Handler {
 	return newServerWithBodyLimit(provider, DefaultMaxBodyBytes)
@@ -136,9 +133,7 @@ func TestApplyChangesAnswers204AndForwardsTheChangeSet(t *testing.T) {
 }
 
 func TestNegotiateServesTheDomainFilter(t *testing.T) {
-	provider := &fakeProvider{domainFil: webhookapi.DomainFilter{Include: []string{}, Exclude: []string{}}}
-
-	res := do(t, newServer(provider), http.MethodGet, "/", "", map[string]string{"Accept": testMediaType})
+	res := do(t, newServer(&fakeProvider{}), http.MethodGet, "/", "", map[string]string{"Accept": testMediaType})
 
 	if res.Code != http.StatusOK {
 		t.Fatalf("status: got %d, want 200", res.Code)

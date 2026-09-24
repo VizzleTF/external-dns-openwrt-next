@@ -27,16 +27,11 @@ provider:
         value: 127.0.0.1
       - name: ROUTER_PORT
         value: "8888"
-      - name: ROUTER_HEALTHCHECK_PATH
-        value: /healthz
+      # Serves /healthz and /metrics.
       - name: ROUTER_HEALTHCHECK_PORT
         value: "8080"
-      # Served on the healthcheck port. Empty disables the endpoint.
-      - name: ROUTER_METRICS_PATH
-        value: /metrics
-      # restart | reload | uci-apply | none — see README.
-      # `reload` does nothing where dnsmasq runs under ujail, and never
-      # applies CNAMEs; `restart` is the only strategy that applies both.
+      # restart | uci-apply | none — see README. `restart` is the only
+      # strategy that applies both A and CNAME records.
       - name: PROVIDER_OPENWRT_RELOADSTRATEGY
         value: restart
       # Ownership: only records carrying this marker are managed. Required
@@ -44,10 +39,6 @@ provider:
       # not create. Empty disables ownership.
       - name: PROVIDER_OPENWRT_OWNERSHIPID
         value: external-dns
-      - name: PROVIDER_OPENWRT_OWNERSHIPOPTION
-        value: external_dns
-      - name: PROVIDER_OPENWRT_ADOPTEXISTING
-        value: "true"
       - name: PROVIDER_OPENWRT_LUCIRPC_HOSTNAME
         value: "192.168.1.1"
       - name: PROVIDER_OPENWRT_LUCIRPC_PORT

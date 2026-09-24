@@ -39,7 +39,6 @@ type Provider interface {
 	Records(ctx context.Context) ([]*webhookapi.Endpoint, error)
 	ApplyChanges(ctx context.Context, changes *webhookapi.Changes) error
 	AdjustEndpoints(endpoints []*webhookapi.Endpoint) []*webhookapi.Endpoint
-	GetDomainFilter() webhookapi.DomainFilter
 }
 
 type Webhook struct {
@@ -96,13 +95,15 @@ func (w *Webhook) Register(mux *http.ServeMux) {
 	mux.HandleFunc("POST /adjustendpoints", w.AdjustEndpoints)
 }
 
-// Negotiate reports the domain filter this provider serves.
+// Negotiate reports no domain filter of its own: ExternalDNS applies the
+// --domain-filter it was started with, and this provider has no additional
+// knowledge of which zones the router should serve.
 func (w *Webhook) Negotiate(rw http.ResponseWriter, req *http.Request) {
 	if !w.requireMediaType(rw, req, headerAccept) {
 		return
 	}
 
-	w.writeJSON(rw, http.StatusOK, w.provider.GetDomainFilter())
+	w.writeJSON(rw, http.StatusOK, webhookapi.DomainFilter{Include: []string{}, Exclude: []string{}})
 }
 
 // Records returns everything the provider currently manages.

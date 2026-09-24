@@ -2,7 +2,6 @@ package openwrt
 
 import (
 	"fmt"
-	"regexp"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/lucirpc"
 )
@@ -23,15 +22,6 @@ const (
 	// DHCP leases survive in /tmp/dhcp.leases.
 	ReloadStrategyRestart = "restart"
 
-	// ReloadStrategyReload runs `/etc/init.d/dnsmasq reload`.
-	//
-	// WARNING: verified ineffective on OpenWrt 25 with dnsmasq under ujail.
-	// `reload_service()` is `rc_procd start_service; procd_send_signal dnsmasq`,
-	// and the signal does not reach the jailed process — the files are
-	// regenerated but the running dnsmasq keeps serving the previous set. Kept
-	// for routers where dnsmasq is not jailed, and it never applies CNAMEs.
-	ReloadStrategyReload = "reload"
-
 	// ReloadStrategyUciApply calls `uci apply` with no arguments. It commits
 	// and applies EVERY pending UCI config, not just dhcp, so anything an
 	// admin left staged on the router is applied too. Use it when the RPC user
@@ -44,11 +34,11 @@ const (
 	ReloadStrategyNone = "none"
 )
 
-// DefaultOwnershipOption is the UCI option used to mark records this provider
-// owns. UCI section handlers read only the options they know — `dhcp_domain_add`
+// ownershipOption is the UCI option used to mark records this provider owns.
+// UCI section handlers read only the options they know — `dhcp_domain_add`
 // reads `name`/`ip`, `dhcp_cname_add` reads `cname`/`target` — so an extra
 // option is inert and never reaches the generated dnsmasq config.
-const DefaultOwnershipOption = "external_dns"
+const ownershipOption = "external_dns"
 
 type Config struct {
 	LuciRPC *lucirpc.Config `mapstructure:"lucirpc"`
@@ -57,61 +47,33 @@ type Config struct {
 
 	// OwnershipID scopes the provider to the records it created itself.
 	//
-	// When set, every record written gets `<OwnershipOption>=<OwnershipID>` and
+	// When set, every record written gets `external_dns=<OwnershipID>` and
 	// GetDNSRecords returns only sections carrying that exact value. Records
 	// created by hand stay invisible: ExternalDNS cannot update or delete what
 	// it never sees, which is what makes `policy: sync` safe on a router that
-	// also holds manually maintained entries.
+	// also holds manually maintained entries. An unmarked section that already
+	// matches a record exactly is adopted rather than duplicated.
 	//
 	// Empty (the default) disables ownership entirely and every domain/cname
 	// section is reported — do NOT combine that with `policy: sync`.
 	OwnershipID string `mapstructure:"ownershipID"`
-
-	// OwnershipOption is the UCI option name holding the ownership ID.
-	OwnershipOption string `mapstructure:"ownershipOption"`
-
-	// AdoptExisting makes the provider take over an unowned section instead of
-	// creating a duplicate, when one already matches the record identity
-	// exactly. This is what migrates an existing deployment: the first
-	// reconcile stamps the marker onto the records already on the router
-	// rather than adding a second copy of each.
-	AdoptExisting bool `mapstructure:"adoptExisting"`
 }
 
 func DefaultConfig() *Config {
 	return &Config{
-		LuciRPC:         lucirpc.DefaultConfig(),
-		ReloadStrategy:  ReloadStrategyRestart,
-		OwnershipID:     "",
-		OwnershipOption: DefaultOwnershipOption,
-		AdoptExisting:   true,
+		LuciRPC:        lucirpc.DefaultConfig(),
+		ReloadStrategy: ReloadStrategyRestart,
 	}
-}
-
-// uciOptionName matches what UCI accepts as an option name. A value outside
-// this set is rejected by `uci set` at write time, which would otherwise only
-// surface on the first record the provider tries to create.
-var uciOptionName = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
-
-func validateOwnershipOption(option string) error {
-	if !uciOptionName.MatchString(option) {
-		return fmt.Errorf(
-			"invalid ownership option %q, expected only letters, digits and underscores",
-			option,
-		)
-	}
-	return nil
 }
 
 func validateReloadStrategy(strategy string) error {
 	switch strategy {
-	case ReloadStrategyRestart, ReloadStrategyReload, ReloadStrategyUciApply, ReloadStrategyNone:
+	case ReloadStrategyRestart, ReloadStrategyUciApply, ReloadStrategyNone:
 		return nil
 	default:
 		return fmt.Errorf(
-			"invalid reload strategy %q, expected one of %q, %q, %q, %q",
-			strategy, ReloadStrategyRestart, ReloadStrategyReload,
-			ReloadStrategyUciApply, ReloadStrategyNone,
+			"invalid reload strategy %q, expected one of %q, %q, %q",
+			strategy, ReloadStrategyRestart, ReloadStrategyUciApply, ReloadStrategyNone,
 		)
 	}
 }

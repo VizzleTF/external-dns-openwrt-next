@@ -11,7 +11,6 @@ import (
 
 const (
 	dnsmasqRestartCommand = "/etc/init.d/dnsmasq restart"
-	dnsmasqReloadCommand  = "/etc/init.d/dnsmasq reload"
 	uciConfig             = "dhcp"
 )
 
@@ -29,10 +28,7 @@ type openWRT struct {
 	lucirpc        lucirpc.LuciRPC
 	log            *slog.Logger
 	reloadStrategy string
-
-	ownershipID     string
-	ownershipOption string
-	adoptExisting   bool
+	ownershipID    string
 }
 
 func New(cfg *Config, log *slog.Logger) (OpenWRT, error) {
@@ -40,26 +36,18 @@ func New(cfg *Config, log *slog.Logger) (OpenWRT, error) {
 		return nil, err
 	}
 
-	option := cfg.OwnershipOption
-	if err := validateOwnershipOption(option); err != nil {
-		return nil, err
-	}
-
 	if cfg.OwnershipID != "" {
 		log.Info("ownership enabled, only marked records are managed",
-			slog.String("option", option), slog.String("id", cfg.OwnershipID),
-			slog.Bool("adopt_existing", cfg.AdoptExisting))
+			slog.String("option", ownershipOption), slog.String("id", cfg.OwnershipID))
 	} else {
 		log.Warn("ownership disabled, every domain/cname section is reported — do not combine with policy=sync")
 	}
 
 	return &openWRT{
-		lucirpc:         lucirpc.New(cfg.LuciRPC, log),
-		log:             log,
-		reloadStrategy:  cfg.ReloadStrategy,
-		ownershipID:     cfg.OwnershipID,
-		ownershipOption: option,
-		adoptExisting:   cfg.AdoptExisting,
+		lucirpc:        lucirpc.New(cfg.LuciRPC, log),
+		log:            log,
+		reloadStrategy: cfg.ReloadStrategy,
+		ownershipID:    cfg.OwnershipID,
 	}, nil
 }
 
@@ -117,7 +105,7 @@ func (o *openWRT) readSections(ctx context.Context) (map[string]DNSRecord, error
 }
 
 func (o *openWRT) parseSection(options map[string]any) (DNSRecord, bool) {
-	record := DNSRecord{Owner: stringOption(options, o.ownershipOption)}
+	record := DNSRecord{Owner: stringOption(options, ownershipOption)}
 
 	switch stringOption(options, optionSectionType) {
 	case sectionTypeDomain:
@@ -145,10 +133,7 @@ func (o *openWRT) parseSection(options map[string]any) (DNSRecord, bool) {
 // stringOption reads a UCI option expected to be a plain string. Missing
 // options and list values yield "".
 func stringOption(options map[string]any, key string) string {
-	value, ok := options[key].(string)
-	if !ok {
-		return ""
-	}
+	value, _ := options[key].(string)
 	return value
 }
 
@@ -238,7 +223,7 @@ func (o *openWRT) addRecord(ctx context.Context, index sectionIndex, record DNSR
 
 	// Migration path: the record is already on the router but unmarked, so
 	// stamp it instead of adding a second identical section.
-	if o.ownershipEnabled() && o.adoptExisting {
+	if o.ownershipEnabled() {
 		if section, ok := index.firstUnowned(key); ok {
 			if err := o.setOwner(ctx, section); err != nil {
 				return 0, fmt.Errorf("adopt %s (%s): %w", record.Name, section, err)
@@ -272,7 +257,7 @@ func (o *openWRT) createSection(ctx context.Context, record DNSRecord) (string, 
 	options := [][2]string{{nameOption, record.Name}, {valueOption, record.Value}}
 
 	if o.ownershipEnabled() {
-		options = append(options, [2]string{o.ownershipOption, o.ownershipID})
+		options = append(options, [2]string{ownershipOption, o.ownershipID})
 	}
 
 	section, err := o.lucirpc.Uci(ctx, "add", []string{uciConfig, sectionType})
@@ -290,7 +275,7 @@ func (o *openWRT) createSection(ctx context.Context, record DNSRecord) (string, 
 }
 
 func (o *openWRT) setOwner(ctx context.Context, section string) error {
-	_, err := o.lucirpc.Uci(ctx, "set", []string{uciConfig, section, o.ownershipOption, o.ownershipID})
+	_, err := o.lucirpc.Uci(ctx, "set", []string{uciConfig, section, ownershipOption, o.ownershipID})
 	return err
 }
 
@@ -313,14 +298,6 @@ func (o *openWRT) reload(ctx context.Context) error {
 			return fmt.Errorf("restart dnsmasq: %w", err)
 		}
 
-	case ReloadStrategyReload:
-		// Ineffective where dnsmasq runs under ujail: reload_service() signals
-		// the jail wrapper, not the daemon, so the regenerated files are never
-		// re-read. Never applies CNAMEs either. See config.go.
-		if _, err := o.lucirpc.Sys(ctx, "call", []string{dnsmasqReloadCommand}); err != nil {
-			return fmt.Errorf("reload dnsmasq: %w", err)
-		}
-
 	case ReloadStrategyUciApply:
 		// MUST be called with no arguments. LuCI's JSON-RPC binding is
 		// `function apply(config) return uci:apply(config) end`, but the
@@ -332,9 +309,6 @@ func (o *openWRT) reload(ctx context.Context) error {
 		if _, err := o.lucirpc.Uci(ctx, "apply", []string{}); err != nil {
 			return fmt.Errorf("uci apply: %w", err)
 		}
-
-	default:
-		return fmt.Errorf("unknown reload strategy: %s", o.reloadStrategy)
 	}
 
 	o.log.Debug("reloaded dnsmasq", slog.String("strategy", o.reloadStrategy))

@@ -3,7 +3,8 @@
 ## Unreleased
 
 A pass for over-engineering: what the code carried without needing it is gone.
-Nothing here changes what lands on the router.
+Nothing here changes what lands on the router, but several configuration
+variables are gone — see Breaking.
 
 ### Fixed
 
@@ -12,6 +13,35 @@ Nothing here changes what lands on the router.
   string, while the check looked for the literal `"null"`. The empty token was
   stored, the retried call went out unauthenticated, and the operator saw a 403
   instead of `rpc: login fail`. An empty token is now the login failure it is.
+
+### Breaking
+
+Configuration knobs nobody needed are gone. With default settings nothing
+changes: the same records land on the router, dnsmasq is restarted the same
+way, and `/healthz` and `/metrics` answer where they did. Only a deployment
+that set one of the variables below has to act.
+
+- **`PROVIDER_OPENWRT_RELOADSTRATEGY=reload` is removed.** It did nothing where
+  dnsmasq runs under ujail (OpenWrt 25) and never applied CNAMEs anywhere. The
+  value now fails validation at startup. Use `restart` (the default), or
+  `uci-apply` if the RPC user cannot reach `rpc/sys`.
+- **`PROVIDER_OPENWRT_OWNERSHIPOPTION` is removed.** The marker option is always
+  `external_dns`, the old default. A deployment that set another name has
+  records marked with that name: rename the option on the router before
+  upgrading, e.g. `uci rename dhcp.<section>.<old>=external_dns` per section
+  and `uci commit dhcp`, or they become unowned and are adopted on the next
+  reconcile only if ExternalDNS still asks for them.
+- **`PROVIDER_OPENWRT_ADOPTEXISTING` is removed.** With ownership on, an
+  unmarked section that matches a record exactly is always adopted, which was
+  the default. The variable is ignored.
+- **`ROUTER_HEALTHCHECK_PATH` and `ROUTER_METRICS_PATH` are removed.** The paths
+  are fixed at `/healthz` and `/metrics`, as the webhook specification and the
+  chart expect, on `ROUTER_HEALTHCHECK_PORT`. The metrics endpoint can no
+  longer be switched off; do not scrape it if it is not wanted. The variables
+  are ignored.
+- **`LOG_LEVEL` is parsed by `log/slog`.** `debug`, `info`, `warn` and `error`
+  work as before, in any case. `warning` and an empty value now fail at
+  startup: use `warn`, or leave the variable unset for `info`.
 
 ### Removed
 

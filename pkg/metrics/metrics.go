@@ -7,21 +7,18 @@
 // a binary that currently links nothing outside the standard library. The
 // format itself is three lines per metric and has been stable for a decade.
 //
-// A Registry is safe for concurrent use: every value is an atomic, and the
-// registry lock is only taken when a series is created or the whole set is
-// rendered.
+// A Registry is safe for concurrent use: one lock guards every metric. A
+// handful of updates per reconcile does not need anything finer.
 package metrics
 
 import (
 	"io"
-	"math"
 	"runtime"
 	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 )
 
 // Prefix starts every metric name this binary exposes. Prometheus convention
@@ -59,32 +56,15 @@ type metric struct {
 	kind       metricType
 	labelNames []string
 
-	mu     sync.Mutex
+	mu     *sync.Mutex // the registry's
 	series map[string]*series
 }
 
 // series is one label combination of one metric.
-//
-// Values are held as bits of a float64 so a gauge can be set to a timestamp or
-// a fraction while a counter still increments without a lock.
 type series struct {
 	labelValues []string
-	bits        atomic.Uint64
+	value       float64
 }
-
-func (s *series) add(delta float64) {
-	for {
-		old := s.bits.Load()
-		updated := math.Float64bits(math.Float64frombits(old) + delta)
-		if s.bits.CompareAndSwap(old, updated) {
-			return
-		}
-	}
-}
-
-func (s *series) set(value float64) { s.bits.Store(math.Float64bits(value)) }
-
-func (s *series) value() float64 { return math.Float64frombits(s.bits.Load()) }
 
 // Counter is a monotonically increasing metric.
 type Counter struct{ m *metric }
@@ -119,6 +99,7 @@ func (r *Registry) register(name, help string, kind metricType, labelNames []str
 		help:       help,
 		kind:       kind,
 		labelNames: labelNames,
+		mu:         &r.mu,
 		series:     make(map[string]*series),
 	}
 	r.metrics = append(r.metrics, m)
@@ -135,58 +116,51 @@ func (c *Counter) Add(delta float64, labelValues ...string) {
 	if delta < 0 {
 		return
 	}
-	c.m.seriesFor(labelValues).add(delta)
+	c.m.update(labelValues, func(s *series) { s.value += delta })
 }
 
 // Set replaces the value of the series with these label values.
 func (g *Gauge) Set(value float64, labelValues ...string) {
-	g.m.seriesFor(labelValues).set(value)
+	g.m.update(labelValues, func(s *series) { s.value = value })
 }
 
-func (m *metric) seriesFor(labelValues []string) *series {
+// update applies fn to the series with these label values, creating it first.
+func (m *metric) update(labelValues []string, fn func(*series)) {
 	key := strings.Join(labelValues, "\xff")
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if existing, ok := m.series[key]; ok {
-		return existing
+	s, ok := m.series[key]
+	if !ok {
+		// Copied: the caller's slice may be reused, and these values outlive it.
+		s = &series{labelValues: append([]string(nil), labelValues...)}
+		m.series[key] = s
 	}
-
-	// Copied: the caller's slice may be reused, and these values outlive it.
-	values := make([]string, len(labelValues))
-	copy(values, labelValues)
-
-	created := &series{labelValues: values}
-	m.series[key] = created
-	return created
+	fn(s)
 }
 
 // WriteTo renders the whole registry. Metrics keep registration order and
 // series are sorted by label value, so a scrape — and a test — reads the same
 // way every time.
 func (r *Registry) WriteTo(w io.Writer) (int64, error) {
-	r.mu.Lock()
-	registered := make([]*metric, len(r.metrics))
-	copy(registered, r.metrics)
-	r.mu.Unlock()
-
 	var out strings.Builder
-	for _, m := range registered {
+	r.mu.Lock()
+	for _, m := range r.metrics {
 		m.writeTo(&out)
 	}
+	r.mu.Unlock()
 
 	n, err := io.WriteString(w, out.String())
 	return int64(n), err
 }
 
+// writeTo renders one metric. The caller holds the registry lock.
 func (m *metric) writeTo(out *strings.Builder) {
-	m.mu.Lock()
 	all := make([]*series, 0, len(m.series))
 	for _, s := range m.series {
 		all = append(all, s)
 	}
-	m.mu.Unlock()
 
 	if len(all) == 0 {
 		return
@@ -206,7 +180,7 @@ func (m *metric) writeTo(out *strings.Builder) {
 	for _, s := range all {
 		out.WriteString(m.name)
 		out.WriteString(formatLabels(m.labelNames, s.labelValues))
-		out.WriteString(" " + strconv.FormatFloat(s.value(), 'g', -1, 64) + "\n")
+		out.WriteString(" " + strconv.FormatFloat(s.value, 'g', -1, 64) + "\n")
 	}
 }
 

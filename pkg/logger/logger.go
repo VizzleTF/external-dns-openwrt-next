@@ -14,9 +14,9 @@ import (
 
 // New builds a logger from the configuration.
 func New(config *Config) (*slog.Logger, error) {
-	level, err := parseLevel(config.Level)
-	if err != nil {
-		return nil, err
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(config.Level)); err != nil {
+		return nil, fmt.Errorf("invalid log level %q: %w", config.Level, err)
 	}
 
 	options := &slog.HandlerOptions{Level: level}
@@ -32,19 +32,4 @@ func New(config *Config) (*slog.Logger, error) {
 	}
 
 	return slog.New(handler), nil
-}
-
-func parseLevel(level string) (slog.Level, error) {
-	switch strings.ToLower(level) {
-	case "debug":
-		return slog.LevelDebug, nil
-	case "info", "":
-		return slog.LevelInfo, nil
-	case "warn", "warning":
-		return slog.LevelWarn, nil
-	case "error":
-		return slog.LevelError, nil
-	default:
-		return 0, fmt.Errorf("invalid log level %q", level)
-	}
 }

@@ -17,13 +17,9 @@ func TestEnvironmentVariableNames(t *testing.T) {
 	t.Setenv("LOG_ENCODING", "console")
 	t.Setenv("ROUTER_ADDRESS", "0.0.0.0")
 	t.Setenv("ROUTER_PORT", "9999")
-	t.Setenv("ROUTER_HEALTHCHECK_PATH", "/ping")
 	t.Setenv("ROUTER_HEALTHCHECK_PORT", "9090")
-	t.Setenv("ROUTER_METRICS_PATH", "/prometheus")
-	t.Setenv("PROVIDER_OPENWRT_RELOADSTRATEGY", openwrt.ReloadStrategyReload)
+	t.Setenv("PROVIDER_OPENWRT_RELOADSTRATEGY", openwrt.ReloadStrategyUciApply)
 	t.Setenv("PROVIDER_OPENWRT_OWNERSHIPID", "homelab")
-	t.Setenv("PROVIDER_OPENWRT_OWNERSHIPOPTION", "marker")
-	t.Setenv("PROVIDER_OPENWRT_ADOPTEXISTING", "false")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_HOSTNAME", "10.0.0.1")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_PORT", "8443")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_SSL", "false")
@@ -49,13 +45,9 @@ func TestEnvironmentVariableNames(t *testing.T) {
 		{"LOG_ENCODING", cfg.Log.Encoding, "console"},
 		{"ROUTER_ADDRESS", cfg.Router.Address, "0.0.0.0"},
 		{"ROUTER_PORT", cfg.Router.Port, "9999"},
-		{"ROUTER_HEALTHCHECK_PATH", cfg.Router.HealthCheckPath, "/ping"},
 		{"ROUTER_HEALTHCHECK_PORT", cfg.Router.HealthCheckPort, "9090"},
-		{"ROUTER_METRICS_PATH", cfg.Router.MetricsPath, "/prometheus"},
-		{"PROVIDER_OPENWRT_RELOADSTRATEGY", cfg.Provider.OpenWRT.ReloadStrategy, openwrt.ReloadStrategyReload},
+		{"PROVIDER_OPENWRT_RELOADSTRATEGY", cfg.Provider.OpenWRT.ReloadStrategy, openwrt.ReloadStrategyUciApply},
 		{"PROVIDER_OPENWRT_OWNERSHIPID", cfg.Provider.OpenWRT.OwnershipID, "homelab"},
-		{"PROVIDER_OPENWRT_OWNERSHIPOPTION", cfg.Provider.OpenWRT.OwnershipOption, "marker"},
-		{"PROVIDER_OPENWRT_ADOPTEXISTING", cfg.Provider.OpenWRT.AdoptExisting, false},
 		{"PROVIDER_OPENWRT_LUCIRPC_HOSTNAME", rpc.Hostname, "10.0.0.1"},
 		{"PROVIDER_OPENWRT_LUCIRPC_PORT", rpc.Port, 8443},
 		{"PROVIDER_OPENWRT_LUCIRPC_SSL", rpc.SSL, false},
@@ -87,32 +79,27 @@ func TestDefaultsSurviveAnEmptyEnvironment(t *testing.T) {
 	if cfg.Router.HealthCheckPort != "8080" {
 		t.Errorf("healthcheck port: got %q, want 8080", cfg.Router.HealthCheckPort)
 	}
-	if cfg.Router.MetricsPath != "/metrics" {
-		t.Errorf("metrics path: got %q, want /metrics", cfg.Router.MetricsPath)
-	}
 	if cfg.Provider.OpenWRT.ReloadStrategy != openwrt.ReloadStrategyRestart {
 		t.Errorf("reload strategy: got %q", cfg.Provider.OpenWRT.ReloadStrategy)
 	}
 	if cfg.Provider.OpenWRT.OwnershipID != "" {
 		t.Errorf("ownership must stay off by default, got %q", cfg.Provider.OpenWRT.OwnershipID)
 	}
-	if !cfg.Provider.OpenWRT.AdoptExisting {
-		t.Error("adoption must default to true")
-	}
 }
 
 func TestAnEmptyValueIsNotTheSameAsUnset(t *testing.T) {
-	// ROUTER_METRICS_PATH="" is how the metrics endpoint is switched off, so an
-	// empty value has to overwrite the default rather than be ignored as unset.
-	t.Setenv("ROUTER_METRICS_PATH", "")
+	// An empty value overwrites the default rather than being ignored as
+	// unset: OWNERSHIPID="" is how ownership is switched off explicitly.
+	t.Setenv("PROVIDER_OPENWRT_OWNERSHIPID", "")
 
 	cfg := defaultConfig()
+	cfg.Provider.OpenWRT.OwnershipID = "preset"
 	if err := config.Read(cfg); err != nil {
 		t.Fatalf("read config: %v", err)
 	}
 
-	if cfg.Router.MetricsPath != "" {
-		t.Errorf("metrics path: got %q, want it empty", cfg.Router.MetricsPath)
+	if cfg.Provider.OpenWRT.OwnershipID != "" {
+		t.Errorf("ownership id: got %q, want it empty", cfg.Provider.OpenWRT.OwnershipID)
 	}
 }
 

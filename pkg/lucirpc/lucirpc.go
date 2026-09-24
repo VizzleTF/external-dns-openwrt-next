@@ -48,7 +48,6 @@ type rpcRequest struct {
 }
 
 type rpcResponse struct {
-	ID     int `json:"id"`
 	Result any `json:"result"`
 	Error  any `json:"error"`
 }
@@ -229,10 +228,6 @@ func redactURL(url string) string {
 // parseString renders an RPC result: strings pass through, anything else is
 // re-encoded as JSON so callers can unmarshal it themselves.
 func parseString(obj any) (string, error) {
-	if obj == nil {
-		return "", errors.New("nil object cannot be parsed")
-	}
-
 	if str, ok := obj.(string); ok {
 		return str, nil
 	}
