@@ -36,12 +36,12 @@ func (f *fakeProvider) ApplyChanges(_ context.Context, changes *webhookapi.Chang
 	return f.failWith
 }
 
-func (f *fakeProvider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) ([]*webhookapi.Endpoint, error) {
+func (f *fakeProvider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) []*webhookapi.Endpoint {
 	f.adjusted = endpoints
 	if f.adjustTo != nil {
-		return f.adjustTo, f.failWith
+		return f.adjustTo
 	}
-	return endpoints, f.failWith
+	return endpoints
 }
 
 func (f *fakeProvider) GetDomainFilter() webhookapi.DomainFilter { return f.domainFil }
@@ -61,7 +61,7 @@ func newServerWithMetrics(provider Provider, maxBodyBytes int64) (http.Handler, 
 	mux := http.NewServeMux()
 	registry := metrics.NewRegistry()
 	hook := New(provider, slog.New(slog.DiscardHandler), registry)
-	hook.MaxBodyBytes = maxBodyBytes
+	hook.maxBodyBytes = maxBodyBytes
 	hook.Register(mux)
 	return mux, registry
 }

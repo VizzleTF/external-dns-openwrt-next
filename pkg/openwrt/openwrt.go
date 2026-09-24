@@ -41,10 +41,6 @@ func New(cfg *Config, log *slog.Logger) (OpenWRT, error) {
 	}
 
 	option := cfg.OwnershipOption
-	if option == "" {
-		option = DefaultOwnershipOption
-	}
-
 	if err := validateOwnershipOption(option); err != nil {
 		return nil, err
 	}
@@ -208,7 +204,7 @@ func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) 
 
 // removeRecord deletes every owned section matching the record. Sections that
 // belong to someone else are never touched.
-func (o *openWRT) removeRecord(ctx context.Context, index *sectionIndex, record DNSRecord) (int, error) {
+func (o *openWRT) removeRecord(ctx context.Context, index sectionIndex, record DNSRecord) (int, error) {
 	sections := index.owned(record.Key(), o.ownershipID)
 	if len(sections) == 0 {
 		o.log.Info("record already absent, nothing to delete", recordFields(record)...)
@@ -228,7 +224,7 @@ func (o *openWRT) removeRecord(ctx context.Context, index *sectionIndex, record 
 
 // addRecord creates the record, adopts a matching unowned section, or does
 // nothing when it is already owned and present.
-func (o *openWRT) addRecord(ctx context.Context, index *sectionIndex, record DNSRecord) (int, error) {
+func (o *openWRT) addRecord(ctx context.Context, index sectionIndex, record DNSRecord) (int, error) {
 	if err := record.Validate(); err != nil {
 		return 0, err
 	}

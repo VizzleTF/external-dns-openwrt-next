@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"log/slog"
@@ -41,13 +41,13 @@ type LuciRPC interface {
 	Sys(context.Context, string, []string) (string, error)
 }
 
-type Payload struct {
+type rpcRequest struct {
 	ID     int      `json:"id"`
 	Method string   `json:"method"`
 	Params []string `json:"params"`
 }
 
-type Response struct {
+type rpcResponse struct {
 	ID     int `json:"id"`
 	Result any `json:"result"`
 	Error  any `json:"error"`
@@ -58,22 +58,14 @@ type lucirpc struct {
 	httpClient *http.Client
 	log        *slog.Logger
 
-	// ExternalDNS drives /records and /records concurrently with the health
-	// endpoint, and re-authentication rewrites the token, so guard it.
-	mu    sync.RWMutex
-	token string
+	// ExternalDNS can call the webhook concurrently, and re-authentication
+	// rewrites the token, so it is swapped atomically.
+	token atomic.Value // string
 }
 
 func (c *lucirpc) getToken() string {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.token
-}
-
-func (c *lucirpc) setToken(token string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.token = token
+	token, _ := c.token.Load().(string)
+	return token
 }
 
 func New(config *Config, log *slog.Logger) LuciRPC {
@@ -112,7 +104,6 @@ func (c *lucirpc) Sys(ctx context.Context, method string, params []string) (stri
 func (c *lucirpc) auth(ctx context.Context) error {
 	token, err := c.rpc(ctx, authPath, methodLogin, []string{c.config.Auth.Username, c.config.Auth.Password})
 	if err != nil {
-		c.log.Error("rpc: login fail", slog.Any("error", err))
 		return err
 	}
 
@@ -122,32 +113,28 @@ func (c *lucirpc) auth(ctx context.Context) error {
 		return ErrRpcLoginFail
 	}
 
-	c.setToken(token)
+	c.token.Store(token)
 	return nil
 }
 
 func (c *lucirpc) rpc(ctx context.Context, path, method string, params []string) (string, error) {
-	data, err := json.Marshal(Payload{
+	data, err := json.Marshal(rpcRequest{
 		ID:     1,
 		Method: method,
 		Params: params,
 	})
 	if err != nil {
-		c.log.Error("marshal fail", slog.Any("error", err))
 		return "", err
 	}
 
-	url := c.getUri(path, method)
-	respBody, err := c.call(ctx, url, data)
+	respBody, err := c.call(ctx, c.getUri(path, method), data)
 	if err != nil {
-		c.log.Error("call fail", slog.Any("error", err))
 		return "", err
 	}
 
-	var response Response
+	var response rpcResponse
 	if err := json.Unmarshal(respBody, &response); err != nil {
-		c.log.Error("unmarshal fail", slog.Any("error", err))
-		return "", err
+		return "", fmt.Errorf("decode rpc response: %w", err)
 	}
 
 	if response.Error != nil {
@@ -162,8 +149,6 @@ func (c *lucirpc) rpc(ctx context.Context, path, method string, params []string)
 }
 
 func (c *lucirpc) getUri(path, method string) string {
-	// The auth token is a credential — never log it.
-	c.log.Debug("uri", slog.String("path", path), slog.String("method", method))
 	proto := "https://"
 	if !c.config.SSL {
 		proto = "http://"

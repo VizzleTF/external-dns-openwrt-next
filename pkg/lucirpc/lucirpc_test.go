@@ -49,8 +49,8 @@ func TestAuthStoresTheToken(t *testing.T) {
 	if err := client.auth(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if client.token != "foobar" {
-		t.Errorf("token: got %q", client.token)
+	if got := client.getToken(); got != "foobar" {
+		t.Errorf("token: got %q", got)
 	}
 }
 
@@ -74,8 +74,8 @@ func TestAuthFailures(t *testing.T) {
 			if err := client.auth(context.Background()); !errors.Is(err, tc.want) {
 				t.Errorf("got %v, want %v", err, tc.want)
 			}
-			if client.token != "" {
-				t.Errorf("token: got %q, want none", client.token)
+			if got := client.getToken(); got != "" {
+				t.Errorf("token: got %q, want none", got)
 			}
 		})
 	}

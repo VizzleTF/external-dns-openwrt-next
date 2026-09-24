@@ -198,16 +198,13 @@ func TestAdjustEndpoints(t *testing.T) {
 
 	// Left in place they would be planned, silently skipped at write time, and
 	// re-planned on every run.
-	adjusted, err := p.AdjustEndpoints([]*webhookapi.Endpoint{
+	adjusted := p.AdjustEndpoints([]*webhookapi.Endpoint{
 		endpoint("a.foobar.com", webhookapi.RecordTypeA, "1.1.1.1"),
 		endpoint("aaaa.foobar.com", "AAAA", "::1"),
 		endpoint("txt.foobar.com", "TXT", "hi"),
 		endpoint("c.foobar.com", webhookapi.RecordTypeCNAME, "a.foobar.com"),
 		nil,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	if len(adjusted) != 2 || adjusted[0].DNSName != "a.foobar.com" || adjusted[1].DNSName != "c.foobar.com" {
 		t.Errorf("unsupported types kept: %v", adjusted)
 	}
@@ -215,9 +212,9 @@ func TestAdjustEndpoints(t *testing.T) {
 	// dnsmasq serves every record with its global local_ttl.
 	ttl := endpoint("a.foobar.com", webhookapi.RecordTypeA, "1.1.1.1")
 	ttl.RecordTTL = 60
-	adjusted, err = p.AdjustEndpoints([]*webhookapi.Endpoint{ttl})
-	if err != nil || len(adjusted) != 1 || adjusted[0].RecordTTL != 0 {
-		t.Errorf("per-record TTL kept: %v, %v", adjusted, err)
+	adjusted = p.AdjustEndpoints([]*webhookapi.Endpoint{ttl})
+	if len(adjusted) != 1 || adjusted[0].RecordTTL != 0 {
+		t.Errorf("per-record TTL kept: %v", adjusted)
 	}
 }
 

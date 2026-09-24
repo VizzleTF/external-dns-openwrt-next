@@ -65,7 +65,7 @@ func (p *Provider) ApplyChanges(ctx context.Context, changes *webhookapi.Changes
 //   - record types other than A and CNAME cannot be written to UCI at all;
 //   - per-record TTLs do not exist in `domain`/`cname` sections, so an endpoint
 //     asking for one would never match what Records() reports.
-func (p *Provider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) ([]*webhookapi.Endpoint, error) {
+func (p *Provider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) []*webhookapi.Endpoint {
 	adjusted := make([]*webhookapi.Endpoint, 0, len(endpoints))
 
 	for _, ep := range endpoints {
@@ -90,7 +90,7 @@ func (p *Provider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) ([]*webhook
 		adjusted = append(adjusted, ep)
 	}
 
-	return adjusted, nil
+	return adjusted
 }
 
 func (p *Provider) Records(ctx context.Context) ([]*webhookapi.Endpoint, error) {

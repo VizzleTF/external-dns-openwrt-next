@@ -38,7 +38,7 @@ const (
 type Provider interface {
 	Records(ctx context.Context) ([]*webhookapi.Endpoint, error)
 	ApplyChanges(ctx context.Context, changes *webhookapi.Changes) error
-	AdjustEndpoints(endpoints []*webhookapi.Endpoint) ([]*webhookapi.Endpoint, error)
+	AdjustEndpoints(endpoints []*webhookapi.Endpoint) []*webhookapi.Endpoint
 	GetDomainFilter() webhookapi.DomainFilter
 }
 
@@ -47,8 +47,8 @@ type Webhook struct {
 	log      *slog.Logger
 	metrics  *webhookMetrics
 
-	// MaxBodyBytes caps a decoded request body. Zero or less disables the cap.
-	MaxBodyBytes int64
+	// maxBodyBytes caps a decoded request body.
+	maxBodyBytes int64
 }
 
 // webhookMetrics is what this layer can measure that the HTTP access log
@@ -67,7 +67,7 @@ func New(provider Provider, log *slog.Logger, registry *metrics.Registry) *Webho
 		provider:     provider,
 		log:          log,
 		metrics:      newWebhookMetrics(registry),
-		MaxBodyBytes: DefaultMaxBodyBytes,
+		maxBodyBytes: DefaultMaxBodyBytes,
 	}
 }
 
@@ -165,11 +165,7 @@ func (w *Webhook) AdjustEndpoints(rw http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	adjusted, err := w.provider.AdjustEndpoints(endpoints)
-	if err != nil {
-		w.reject(rw, http.StatusInternalServerError, "error adjusting endpoints", slog.Any("error", err))
-		return
-	}
+	adjusted := w.provider.AdjustEndpoints(endpoints)
 
 	// What the provider refused to represent — AAAA from a dual-stack Service,
 	// PTR, anything else UCI has no section for. Visible only in the log until
@@ -234,9 +230,7 @@ func (w *Webhook) requireMediaType(rw http.ResponseWriter, req *http.Request, he
 func (w *Webhook) decode(rw http.ResponseWriter, req *http.Request, target any) bool {
 	defer func() { _ = req.Body.Close() }()
 
-	if w.MaxBodyBytes > 0 {
-		req.Body = http.MaxBytesReader(rw, req.Body, w.MaxBodyBytes)
-	}
+	req.Body = http.MaxBytesReader(rw, req.Body, w.maxBodyBytes)
 
 	if err := json.NewDecoder(req.Body).Decode(target); err != nil {
 		// An over-sized body is the client's fault and a distinct one: 413

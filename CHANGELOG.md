@@ -17,11 +17,17 @@ Nothing here changes what lands on the router.
 
 - **`PROVIDER_OPENWRT_RELOADSTRATEGY=dnsmasq`.** The legacy alias for `reload`,
   kept since v0.4.0, now fails validation at startup. Use `reload`.
+- **An empty `PROVIDER_OPENWRT_OWNERSHIPOPTION` no longer falls back to
+  `external_dns`.** The default already comes from the config; setting the
+  variable to an empty string now fails validation at startup instead of being
+  silently overridden.
 - **`PROVIDER_OPENWRT_LUCIRPC_RPC_ID`.** The JSON-RPC request id is always `1`;
   nothing on the router reads it. A leftover variable is ignored.
 - The test-only dependencies — ginkgo, gomega and uber mock — and the generated
   mocks: every test now runs on `testing` with hand-written fakes, and the
   module requires nothing at all.
+- Duplicate error logging in the LuCI client: a failed call was logged there
+  and again by the webhook. The webhook's line, which carries the error, stays.
 
 ## v0.7.0
 
