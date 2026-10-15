@@ -175,6 +175,18 @@ func TestApplyChanges(t *testing.T) {
 			add:    []openwrt.DNSRecord{a("foo.foobar.com", "2.2.2.2")},
 		},
 		{
+			// Records() reports two sections for one record as a duplicate
+			// target. Removing the record deletes both, so cancelling one pair
+			// would leave nothing to write it back.
+			name: "deletes a duplicate section and writes the record back",
+			changes: webhookapi.Changes{
+				UpdateOld: []*webhookapi.Endpoint{endpoint("dup.foobar.com", webhookapi.RecordTypeA, "1.1.1.1", "1.1.1.1")},
+				UpdateNew: []*webhookapi.Endpoint{endpoint("dup.foobar.com", webhookapi.RecordTypeA, "1.1.1.1")},
+			},
+			remove: []openwrt.DNSRecord{a("dup.foobar.com", "1.1.1.1"), a("dup.foobar.com", "1.1.1.1")},
+			add:    []openwrt.DNSRecord{a("dup.foobar.com", "1.1.1.1")},
+		},
+		{
 			// The router layer skips the round trip for an empty pair.
 			name:   "passes an empty plan through as nothing to do",
 			remove: []openwrt.DNSRecord{},
@@ -222,6 +234,27 @@ func TestAdjustEndpoints(t *testing.T) {
 	})
 	if len(adjusted) != 1 || adjusted[0].DNSName != "ok.foobar.com" {
 		t.Errorf("invalid endpoints kept: %v", adjusted)
+	}
+
+	// dnsmasq answers a wildcard only as the literal name, and writes one
+	// target of a CNAME; either would be planned again on every run.
+	adjusted = p.AdjustEndpoints([]*webhookapi.Endpoint{
+		endpoint("*.apps.foobar.com", webhookapi.RecordTypeA, "1.1.1.1"),
+		endpoint("*.www.foobar.com", webhookapi.RecordTypeCNAME, "a.foobar.com"),
+		endpoint("lb.foobar.com", webhookapi.RecordTypeCNAME, "lb1.foobar.com", "lb2.foobar.com"),
+		endpoint("multi.foobar.com", webhookapi.RecordTypeA, "1.1.1.1", "2.2.2.2"),
+	})
+	if len(adjusted) != 1 || adjusted[0].DNSName != "multi.foobar.com" {
+		t.Errorf("wildcard or multi-target CNAME kept: %v", adjusted)
+	}
+
+	// Records() reports neither, so the plan would never match them.
+	tagged := endpoint("a.foobar.com", webhookapi.RecordTypeA, "1.1.1.1")
+	tagged.SetIdentifier = "eu"
+	tagged.ProviderSpecific = []webhookapi.ProviderSpecificProperty{{Name: "webhook/foo", Value: "bar"}}
+	adjusted = p.AdjustEndpoints([]*webhookapi.Endpoint{tagged})
+	if len(adjusted) != 1 || adjusted[0].SetIdentifier != "" || adjusted[0].ProviderSpecific != nil {
+		t.Errorf("set identifier or provider-specific property kept: %v", adjusted)
 	}
 
 	// dnsmasq serves every record with its global local_ttl.

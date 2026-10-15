@@ -18,9 +18,19 @@ For examples of creating DNS records via CRDs or via Ingress/Service annotations
 - Names and targets are printable ASCII without spaces, `,`, `"` or `#`, at
   most 253 characters with labels of at most 63, and an `A` target is an IPv4
   address. An endpoint holding anything else is dropped the same way.
+- Wildcard names are not supported. dnsmasq answers a hostfile entry or a CNAME
+  alias for the literal name only, so `*.apps.lan` would answer `*.apps.lan`
+  and nothing under it. Such an endpoint is dropped with a warning.
+- A CNAME has one target. An endpoint with more, as `target: a.lan,b.lan`
+  gives, is dropped with a warning: dnsmasq does not start with two CNAMEs for
+  one alias.
 - Per-record TTLs are not supported. UCI `domain`/`cname` sections carry no TTL —
   dnsmasq answers them with its global `local_ttl` — so `Records()` reports a
   fixed 300 and a requested TTL is stripped rather than planned on every run.
+- Set identifiers and provider-specific properties are ignored, and stripped
+  for the same reason: a section has no place for them. Endpoints for one name
+  and type that differ only in set identifier become one record, and
+  ExternalDNS keeps one of them.
 
 ## What this fork changes
 
@@ -34,8 +44,9 @@ ownership enabled it can only ever touch records it created itself.
   to the router before writing `UpdateNew`.
 - **Multi-target A endpoints work.** Upstream read `Targets[0]` and dropped the
   rest. Records are now matched on their full identity (name *and* value), so
-  removing one target of a name leaves the others alone. A CNAME keeps one
-  target, since dnsmasq does not start with two for one alias.
+  removing one target of a name leaves the others alone. A CNAME endpoint with
+  more than one target is dropped, since dnsmasq does not start with two
+  CNAMEs for one alias.
 - **Idempotent.** Deleting an absent record or adding an existing one is a
   no-op instead of an error, so one stale entry can no longer wedge every
   subsequent change.
@@ -285,7 +296,7 @@ scrape it through
 | `external_dns_openwrt_planned_endpoints_total{action}` | counter | Endpoints ExternalDNS asked for, by `create`/`update`/`delete`. Flat lines are a quiet cluster; a steady climb is a plan that never converges. |
 | `external_dns_openwrt_apply_changes_total{result}` | counter | Change sets applied, `success` or `error`. |
 | `external_dns_openwrt_last_apply_success_timestamp_seconds` | gauge | When a change set last reached the router. `time() - <metric>` is the alert worth having. |
-| `external_dns_openwrt_dropped_endpoints_total{record_type}` | counter | Endpoints dropped in `AdjustEndpoints`, by type — `AAAA` from a dual-stack Service, `PTR` from `--create-ptr`, anything UCI has no section for, and `A`/`CNAME` with a name or target dnsmasq cannot take. The type is the actionable part: it says which flag to narrow, or that an annotation needs fixing. |
+| `external_dns_openwrt_dropped_endpoints_total{record_type}` | counter | Endpoints dropped in `AdjustEndpoints`, by type — `AAAA` from a dual-stack Service, `PTR` from `--create-ptr`, anything UCI has no section for, and `A`/`CNAME` with a wildcard name, a name or target dnsmasq cannot take, or, for a CNAME, more than one target. The type is the actionable part: it says which flag to narrow, or that an annotation needs fixing. |
 
 No client library: the exposition format is a few lines per metric, and
 prometheus/client_golang would be the only third-party code in the binary.
@@ -323,9 +334,11 @@ asked to write:
 
 | Annotation | Effect here |
 | ---------- | ----------- |
-| `hostname` | The name to publish; comma-separated for several. |
-| `target` | Overrides the record value. A target parsing as IPv4 is published as `A`, as IPv6 as `AAAA` — which this provider drops — and anything else as `CNAME`. |
+| `hostname` | The name to publish; comma-separated for several. A wildcard (`*.apps.lan`) is dropped, since dnsmasq does not expand it. |
+| `target` | Overrides the record value. A target parsing as IPv4 is published as `A`, as IPv6 as `AAAA` — which this provider drops — and anything else as `CNAME`. A CNAME takes one target, so a list of several is dropped. |
 | `ttl` | Stripped in `AdjustEndpoints`, as above. |
+| `set-identifier` | Stripped in `AdjustEndpoints`. Endpoints for one name and type that differ only in it become one record, and ExternalDNS keeps one of them. |
+| `webhook-*`, `alias` | Provider-specific properties, stripped in `AdjustEndpoints`. |
 | `record-type` | `ptr` opts a resource into PTR records, as does `--create-ptr`. UCI cannot write them, so they are dropped. |
 
 `--managed-record-types` defaults to `A,AAAA,CNAME`, so a dual-stack Service

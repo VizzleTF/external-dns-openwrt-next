@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"sort"
+	"strings"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/openwrt"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhookapi"
@@ -64,10 +65,15 @@ func (p *Provider) ApplyChanges(ctx context.Context, changes *webhookapi.Changes
 // run, and anything it refuses at write time fails the whole change set:
 //
 //   - record types other than A and CNAME cannot be written to UCI at all;
+//   - dnsmasq answers a hostfile entry or a CNAME alias for the literal name
+//     only, so a wildcard would serve nothing but `*.example.com` itself;
+//   - a CNAME has one target, and a second section for its alias is skipped at
+//     write time;
 //   - a name or target that fails openwrt.DNSRecord.Validate would fail every
 //     other change planned with it, on every retry;
-//   - per-record TTLs do not exist in `domain`/`cname` sections, so an endpoint
-//     asking for one would never match what Records() reports.
+//   - per-record TTLs, set identifiers and provider-specific properties have no
+//     place in a `domain`/`cname` section, so an endpoint carrying one would
+//     never match what Records() reports.
 func (p *Provider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) []*webhookapi.Endpoint {
 	adjusted := make([]*webhookapi.Endpoint, 0, len(endpoints))
 
@@ -85,6 +91,18 @@ next:
 			continue
 		}
 
+		if strings.HasPrefix(ep.DNSName, "*.") {
+			p.log.Warn("dropping endpoint, dnsmasq does not expand wildcard names",
+				slog.String("name", ep.DNSName), slog.String("type", ep.RecordType))
+			continue
+		}
+
+		if ep.RecordType == webhookapi.RecordTypeCNAME && len(ep.Targets) > 1 {
+			p.log.Warn("dropping endpoint, a CNAME has one target and dnsmasq does not start with two",
+				slog.String("name", ep.DNSName), slog.Any("targets", ep.Targets))
+			continue
+		}
+
 		for _, target := range ep.Targets {
 			if err := (openwrt.DNSRecord{Type: ep.RecordType, Name: ep.DNSName, Value: target}).Validate(); err != nil {
 				p.log.Warn("dropping endpoint, it cannot be written to the router",
@@ -98,6 +116,11 @@ next:
 				slog.String("name", ep.DNSName), slog.Int64("ttl", int64(ep.RecordTTL)))
 			ep.RecordTTL = 0
 		}
+
+		// The plan keys a row on the set identifier and updates a record whose
+		// provider-specific properties differ, and Records() reports neither.
+		ep.SetIdentifier = ""
+		ep.ProviderSpecific = nil
 
 		adjusted = append(adjusted, ep)
 	}
@@ -114,24 +137,27 @@ func (p *Provider) Records(ctx context.Context) ([]*webhookapi.Endpoint, error) 
 	return p.dnsRecords2Endpoints(records), nil
 }
 
-// cancelOut drops entries present in both slices, preserving order.
+// cancelOut drops the records whose key appears as often in both slices,
+// preserving order. A key counted differently stays in both: removing a record
+// deletes every section holding it, so UpdateOld [x x] with UpdateNew [x] has
+// to delete the duplicate and write x back.
 func cancelOut(remove, add []openwrt.DNSRecord) ([]openwrt.DNSRecord, []openwrt.DNSRecord) {
-	return without(remove, keys(add)), without(add, keys(remove))
-}
-
-func keys(records []openwrt.DNSRecord) map[string]bool {
-	set := make(map[string]bool, len(records))
-	for _, record := range records {
-		set[record.Key()] = true
+	balance := make(map[string]int, len(remove))
+	for _, record := range remove {
+		balance[record.Key()]++
 	}
-	return set
+	for _, record := range add {
+		balance[record.Key()]--
+	}
+	return unbalanced(remove, balance), unbalanced(add, balance)
 }
 
-// without returns records whose key is not in drop, preserving order.
-func without(records []openwrt.DNSRecord, drop map[string]bool) []openwrt.DNSRecord {
+// unbalanced returns the records whose key does not cancel out, preserving
+// order.
+func unbalanced(records []openwrt.DNSRecord, balance map[string]int) []openwrt.DNSRecord {
 	kept := make([]openwrt.DNSRecord, 0, len(records))
 	for _, record := range records {
-		if !drop[record.Key()] {
+		if balance[record.Key()] != 0 {
 			kept = append(kept, record)
 		}
 	}
