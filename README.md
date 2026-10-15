@@ -32,9 +32,10 @@ ownership enabled it can only ever touch records it created itself.
   were skipped and the run ended in `records not found`.
 - **Updates no longer resurrect the old value.** Upstream wrote `UpdateOld` back
   to the router before writing `UpdateNew`.
-- **Multi-target endpoints work.** Upstream read `Targets[0]` and dropped the
+- **Multi-target A endpoints work.** Upstream read `Targets[0]` and dropped the
   rest. Records are now matched on their full identity (name *and* value), so
-  removing one target of a name leaves the others alone.
+  removing one target of a name leaves the others alone. A CNAME keeps one
+  target, since dnsmasq does not start with two for one alias.
 - **Idempotent.** Deleting an absent record or adding an existing one is a
   no-op instead of an error, so one stale entry can no longer wedge every
   subsequent change.
@@ -129,6 +130,43 @@ Once the marker is on the right records, and only then, switch to
 
 A section already owned by a *different* ID is never adopted; it belongs to
 another instance.
+
+### Records that would stop dnsmasq
+
+dnsmasq does not start with two CNAMEs for one alias, even two with the same
+target, or with a CNAME loop, an alias pointing at itself included, and DNS
+and DHCP for the whole LAN go down with it. So a CNAME is skipped with a
+warning, not written, when another section already holds its alias (one with
+another target, whoever owns it, or another instance's with the same target),
+or when it would close a loop through any CNAMEs on the router. An identical
+unmarked section is still adopted. The rest of the change set goes through.
+The skipped record never reaches the router, so ExternalDNS asks for it again
+on every run and the warning repeats, but nothing is committed and dnsmasq is
+not restarted for it. Remove the section in the way, or change the endpoint, to
+end it.
+
+An A record is still written next to a section for the same name with another
+address that carries no marker or another ID. The provider cannot see that
+section, so it warns that dnsmasq will answer both addresses.
+
+### Changing the ownership ID
+
+A section keeps the ID it was written with. Change
+`PROVIDER_OPENWRT_OWNERSHIPID` alone and every record written under the old ID
+is orphaned: owned by another ID, it is neither adopted nor deleted, and
+ExternalDNS asks for all of them again. Each A record gets a second section
+next to the orphan, and each CNAME is skipped because its alias is taken. Move
+the sections to the new ID instead, with ExternalDNS stopped so that neither ID
+writes in between. On the router, for `OLD` and `NEW`:
+
+```
+for s in $(uci -X show dhcp | sed -n "s/^dhcp\.\([^.]*\)\.external_dns='OLD'$/\1/p"); do
+  uci set "dhcp.$s.external_dns=NEW"
+done
+uci commit dhcp
+```
+
+Then start ExternalDNS with the new ID.
 
 ## Reload strategy
 

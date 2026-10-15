@@ -9,15 +9,15 @@ package openwrt
 type sectionIndex map[string][]indexedSection
 
 type indexedSection struct {
-	name  string
-	owner string
+	name string
+	// record is stored canonical, so named compares names the way Key does.
+	record DNSRecord
 }
 
 func newSectionIndex(sections map[string]DNSRecord) sectionIndex {
 	index := make(sectionIndex, len(sections))
 	for name, record := range sections {
-		key := record.Key()
-		index[key] = append(index[key], indexedSection{name: name, owner: record.Owner})
+		index.add(record, name, record.Owner)
 	}
 	return index
 }
@@ -27,7 +27,7 @@ func newSectionIndex(sections map[string]DNSRecord) sectionIndex {
 func (i sectionIndex) owned(key, ownershipID string) []string {
 	var sections []string
 	for _, section := range i[key] {
-		if ownershipID != "" && section.owner != ownershipID {
+		if ownershipID != "" && section.record.Owner != ownershipID {
 			continue
 		}
 		sections = append(sections, section.name)
@@ -40,21 +40,61 @@ func (i sectionIndex) owned(key, ownershipID string) []string {
 // candidates: they belong to another instance.
 func (i sectionIndex) firstUnowned(key string) (string, bool) {
 	for _, section := range i[key] {
-		if section.owner == "" {
+		if section.record.Owner == "" {
 			return section.name, true
 		}
 	}
 	return "", false
 }
 
-func (i sectionIndex) add(key, section, ownershipID string) {
-	i[key] = append(i[key], indexedSection{name: section, owner: ownershipID})
+// named returns every section holding a record of this type and name, whoever
+// owns it and whatever its value.
+func (i sectionIndex) named(recordType, name string) []indexedSection {
+	name = CanonicalName(name)
+	var matches []indexedSection
+	for _, sections := range i {
+		for _, section := range sections {
+			if section.record.Type == recordType && section.record.Name == name {
+				matches = append(matches, section)
+			}
+		}
+	}
+	return matches
+}
+
+// closesCNAMELoop reports whether a CNAME from alias to target would let the
+// indexed CNAMEs, whoever owns them, lead from target back to alias.
+func (i sectionIndex) closesCNAMELoop(alias, target string) bool {
+	alias = CanonicalName(alias)
+	seen := map[string]bool{}
+	for next := []string{CanonicalName(target)}; len(next) > 0; {
+		name := next[len(next)-1]
+		next = next[:len(next)-1]
+		if name == alias {
+			return true
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		for _, section := range i.named(RecordTypeCNAME, name) {
+			next = append(next, section.record.Value)
+		}
+	}
+	return false
+}
+
+func (i sectionIndex) add(record DNSRecord, section, ownershipID string) {
+	record = record.canonical()
+	record.Owner = ownershipID
+	key := record.Key()
+	i[key] = append(i[key], indexedSection{name: section, record: record})
 }
 
 func (i sectionIndex) markOwned(key, section, ownershipID string) {
 	for pos, existing := range i[key] {
 		if existing.name == section {
-			i[key][pos].owner = ownershipID
+			i[key][pos].record.Owner = ownershipID
 			return
 		}
 	}

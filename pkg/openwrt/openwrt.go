@@ -235,12 +235,42 @@ func (o *openWRT) addRecord(ctx context.Context, index sectionIndex, record DNSR
 		}
 	}
 
+	// Checked after adoption, which writes no second section. dnsmasq refuses
+	// to start on two CNAMEs for one alias, even with the same target, and on a
+	// CNAME loop, taking DNS and DHCP for the LAN down with it. Skipped rather
+	// than failed: an error would block every other change on each retry.
+	if record.Type == RecordTypeCNAME {
+		if taken := index.named(RecordTypeCNAME, record.Name); len(taken) > 0 {
+			o.log.Warn("skipping CNAME, its alias already has one and dnsmasq does not start with two",
+				append(recordFields(record), sectionFields(taken[0])...)...)
+			return 0, nil
+		}
+		if index.closesCNAMELoop(record.Name, record.Value) {
+			o.log.Warn("skipping CNAME, it would close a CNAME loop and dnsmasq does not start with one",
+				recordFields(record)...)
+			return 0, nil
+		}
+	}
+
+	// A section this provider does not own is invisible to the plan, so nothing
+	// will ever reconcile the two addresses. It also fires, once, on a section
+	// a later target of the same endpoint is about to adopt.
+	if record.Type == RecordTypeA && o.ownershipEnabled() {
+		for _, other := range index.named(RecordTypeA, record.Name) {
+			if other.record.Owner != o.ownershipID && other.record.Value != record.Value {
+				o.log.Warn("adding record next to another address it does not own, dnsmasq will answer both",
+					append(recordFields(record), sectionFields(other)...)...)
+				break
+			}
+		}
+	}
+
 	section, err := o.createSection(ctx, record)
 	if err != nil {
 		return 0, fmt.Errorf("add %s: %w", record.Name, err)
 	}
 
-	index.add(key, section, o.ownershipID)
+	index.add(record, section, o.ownershipID)
 	o.log.Info("added record", recordFields(record)...)
 	return 1, nil
 }
@@ -320,5 +350,14 @@ func recordFields(record DNSRecord) []any {
 		slog.String("name", record.Name),
 		slog.String("type", record.Type),
 		slog.String("value", record.Value),
+	}
+}
+
+// sectionFields describes the section in the way of a record.
+func sectionFields(section indexedSection) []any {
+	return []any{
+		slog.String("section", section.name),
+		slog.String("section_value", section.record.Value),
+		slog.String("section_owner", section.record.Owner),
 	}
 }
