@@ -641,6 +641,27 @@ func TestUpdatingRemovesAndAddsInASingleCommit(t *testing.T) {
 		"uci set dhcp cfg01 "+ownershipOption+" "+testOwner, commit, restart)
 }
 
+// Two sections for one record are reported as a duplicate target, and the
+// update planned for that removes the record twice and adds it once.
+func TestUpdatingAwayADuplicateSection(t *testing.T) {
+	rpc := &fakeRPC{sections: map[string]map[string]any{
+		"one": domainSection("dup.bar.com", "1.1.1.1", testOwner),
+		"two": domainSection("DUP.bar.com", "1.1.1.1", testOwner),
+	}}
+	record := aRecord("dup.bar.com", "1.1.1.1")
+
+	if err := owning(rpc).ApplyDNSRecords(context.Background(), []DNSRecord{record, record}, []DNSRecord{record}); err != nil {
+		t.Fatal(err)
+	}
+	// The sections of one record are deleted in map order.
+	if len(rpc.calls) >= 3 {
+		slices.Sort(rpc.calls[1:3])
+	}
+	assertCalls(t, rpc, getAll, "uci delete dhcp one", "uci delete dhcp two", "uci add dhcp domain",
+		"uci set dhcp cfg01 name dup.bar.com", "uci set dhcp cfg01 ip 1.1.1.1",
+		"uci set dhcp cfg01 "+ownershipOption+" "+testOwner, commit, restart)
+}
+
 func TestReloadStrategies(t *testing.T) {
 	for _, tc := range []struct {
 		strategy string

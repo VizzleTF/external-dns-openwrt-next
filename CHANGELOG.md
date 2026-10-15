@@ -80,6 +80,40 @@
   plan compares targets ignoring case but not the dot, so a `Real.LAN.` typed
   into LuCI never matched the `real.lan` asked for. Sections are now reported in
   the canonical spelling this provider writes them in.
+- **A set identifier or a provider-specific property kept the plan from
+  converging.** ExternalDNS keys a plan row on the name and the set identifier,
+  and updates a record whose provider-specific properties differ from what
+  `Records()` reports. `Records()` reports neither, since a `domain`/`cname`
+  section has no place for them. So a `set-identifier` annotation planned a
+  create on every run, under `policy: sync` a delete of the same record too,
+  and under `upsert-only` a changed target left the old one on the router; a
+  `webhook-*` or `alias` annotation planned an update on every run.
+  `AdjustEndpoints` now strips both, as it already stripped TTLs. Endpoints for
+  one name and type that differ only in set identifier now share one row, and
+  ExternalDNS keeps one of them.
+- **A wildcard name was written, and answered for nothing under it.** dnsmasq
+  does not expand `*.apps.lan` in a hostfile or a CNAME: `foo.apps.lan` got
+  `NXDOMAIN` and only the literal `*.apps.lan` was answered, as checked on
+  OpenWrt 24.10 and 25.12. Such an endpoint is now dropped in
+  `AdjustEndpoints` with a warning and counted in
+  `external_dns_openwrt_dropped_endpoints_total`. A wildcard section already on
+  the router is still reported, so `registry: noop` with `policy: sync` deletes
+  it on the next run; anywhere else it stays until removed by hand.
+- **A CNAME endpoint with more than one target is dropped.** A CNAME has one
+  target, and dnsmasq does not start with two for one alias. Such an endpoint,
+  as `target: lb1.lan,lb2.lan` gives, now gets no further than
+  `AdjustEndpoints`, which drops it with a warning and counts it in
+  `external_dns_openwrt_dropped_endpoints_total`, instead of being planned on
+  every run. Sections already written for it are still reported, so
+  `registry: noop` with `policy: sync` deletes them on the next run, a pair
+  that keeps dnsmasq from starting included.
+- **An update that removed a duplicate section did nothing.** Two sections for
+  one record are reported as a duplicate target, so the plan asks for
+  `[x x]` to become `[x]`. Records present on both sides of an update were
+  cancelled out as a set, which dropped `x` from both and left the duplicate in
+  place, with the same update planned on every run. They now cancel out only
+  when they appear as often on both sides: the update deletes both sections and
+  writes one back.
 
 ## v0.8.0
 
