@@ -165,6 +165,41 @@ func TestReadingRecords(t *testing.T) {
 		}
 	})
 
+	t.Run("reports names and CNAME targets canonically", func(t *testing.T) {
+		rpc := &fakeRPC{sections: map[string]map[string]any{
+			"x": domainSection("NAS.Lan.", "10.0.0.5", ""),
+			"y": cnameSection("Alias.LAN.", "Real.LAN.", testOwner),
+		}}
+
+		records, err := unscoped(rpc).GetDNSRecords(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if records["x"] != aRecord("nas.lan", "10.0.0.5") ||
+			records["y"] != (DNSRecord{Type: RecordTypeCNAME, Name: "alias.lan", Value: "real.lan", Owner: testOwner}) {
+			t.Errorf("got %v", records)
+		}
+	})
+
+	// As checked on OpenWrt 24.10 and 25.12: dnsmasq answers AAAA for the first
+	// two and nothing for the third, which it logs as a bad address.
+	t.Run("leaves out a domain section dnsmasq serves as AAAA", func(t *testing.T) {
+		rpc := &fakeRPC{sections: map[string]map[string]any{
+			"v6":     domainSection("nas.lan", "fd00::5", ""),
+			"mapped": domainSection("nas.lan", "::ffff:10.0.0.7", ""),
+			"bad":    domainSection("nas.lan", "010.0.0.1", ""),
+			"a":      domainSection("nas.lan", "10.0.0.5", ""),
+		}}
+
+		records, err := unscoped(rpc).GetDNSRecords(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(records) != 2 || records["a"].Value != "10.0.0.5" || records["bad"].Value != "010.0.0.1" {
+			t.Errorf("got %v", records)
+		}
+	})
+
 	t.Run("returns only records carrying our marker", func(t *testing.T) {
 		rpc := &fakeRPC{sections: map[string]map[string]any{
 			"mine":    domainSection("mine.foo.com", "1.1.1.1", testOwner),
@@ -430,7 +465,6 @@ func TestValidate(t *testing.T) {
 	// Checked on the canonical form, which is what reaches the router.
 	for _, record := range []DNSRecord{
 		aRecord(" Foo.bar.com. ", "1.1.1.1"),
-		aRecord("foo.bar.com", "fd00::5"),
 		{Type: RecordTypeCNAME, Name: "_alias.bar.com", Value: "Target.bar.com."},
 		{Type: RecordTypeCNAME, Name: label63 + ".lan", Value: label63 + ".lan"},
 		aRecord(name253+".", "1.1.1.1"),
@@ -460,6 +494,13 @@ func TestValidate(t *testing.T) {
 	} {
 		if err := record.Validate(); err == nil || !strings.Contains(err.Error(), "longer than DNS allows") {
 			t.Errorf("%q: got %v", record, err)
+		}
+	}
+
+	// dnsmasq answers AAAA for the first two and nothing for the rest.
+	for _, ip := range []string{"fd00::5", "::ffff:10.0.0.7", "010.0.0.1", "1.2.3", "nas.lan"} {
+		if err := aRecord("foo.lan", ip).Validate(); err == nil || !strings.Contains(err.Error(), "not an IPv4 address") {
+			t.Errorf("%q: got %v", ip, err)
 		}
 	}
 }
@@ -562,6 +603,28 @@ func TestDeleting(t *testing.T) {
 		}
 		assertCalls(t, rpc, getAll, "uci delete dhcp mine")
 	})
+}
+
+// With ownership off, a section typed into LuCI for an IPv6 address used to be
+// reported as an A record, and the cluster publishing an A record for the same
+// name planned it away.
+func TestLeavingAnIPv6DomainSectionAlone(t *testing.T) {
+	ctx := context.Background()
+	rpc := &fakeRPC{sections: map[string]map[string]any{"manual": domainSection("nas.lan", "fd00::5", "")}}
+	o := unscoped(rpc)
+
+	records, err := o.GetDNSRecords(ctx)
+	if err != nil || len(records) != 0 {
+		t.Errorf("got %v, %v", records, err)
+	}
+
+	// The update the plan used to ask for: out with the old value, in with the
+	// cluster's.
+	if err := o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("nas.lan", "fd00::5")}, []DNSRecord{aRecord("nas.lan", "10.0.0.5")}); err != nil {
+		t.Fatal(err)
+	}
+	assertCalls(t, rpc, getAll, getAll, "uci add dhcp domain",
+		"uci set dhcp cfg01 name nas.lan", "uci set dhcp cfg01 ip 10.0.0.5", commit, restart)
 }
 
 func TestUpdatingRemovesAndAddsInASingleCommit(t *testing.T) {
