@@ -34,6 +34,15 @@
   run `/etc/init.d/rpcd restart` on the router after upgrading. That ends
   every session, LuCI web logins included; the webhook gets a 403 and logs in
   again on its next call. Checked on OpenWrt 24.10 and 25.12.
+- **The image was built with a Go that no longer gets fixes.** CI took the
+  toolchain from the go directive, so the v0.7.0 and v0.8.0 images shipped the
+  go1.25.0 standard library, earlier ones an older Go still, and Go 1.25 left
+  support when Go 1.27 came out. govulncheck finds 35 known vulnerabilities in
+  go1.25.0 that the webhook's code reaches — 11 in `net/http`, 7 each in
+  `crypto/tls` and `crypto/x509` — some of them fixed only in Go 1.26 and
+  1.27. The image is now built with the newest Go 1.27 patch. The go directive
+  stays at 1.25.0: it names the oldest Go the module builds with, not the one
+  the image ships.
 
 ### Fixed
 
@@ -134,6 +143,21 @@
   request's `Accept`, not its `Content-Type`, nothing between ExternalDNS and
   the webhook caches it, and the upstream webhook server sends no `Vary`
   either.
+
+### Build and CI
+
+- **CI runs govulncheck.** Lint, tests and the build use the newest Go 1.27
+  patch, the one the image is built with, not an older one the runner has
+  cached, and `govulncheck` fails the run on a known vulnerability the code
+  reaches, so the next one turns up in CI instead of in an audit.
+- **Actions are pinned to commit SHAs.** A tag can be moved to other code, and
+  the release job holds `packages: write` on the image. Dependabot proposes a
+  new SHA, with its version in a comment, no sooner than a week after the
+  release. The sanity workflow's token is now read-only, release-drafter only
+  reads pull requests, checkout no longer leaves the token in `.git/config`,
+  and the release build no longer starts from a Go build cache another run
+  saved.
+- golangci-lint v2.13 → v2.14.
 
 ## v0.8.0
 

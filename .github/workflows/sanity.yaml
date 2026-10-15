@@ -6,20 +6,28 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
-    - uses: actions/setup-go@v7
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
-        go-version-file: go.mod
+        persist-credentials: false
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        # The toolchain release.yaml builds the image with, so govulncheck
+        # checks the standard library the image ships.
+        go-version: '1.27.x'
+        check-latest: true
     - name: golangci
-      uses: golangci/golangci-lint-action@v9
+      uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
       with:
         # Pinned, not `latest`: a new linter release turning on a new check
         # would otherwise fail CI on code nobody touched.
-        version: v2.13
+        version: v2.14
 
     - name: vet
       run: go vet ./...
@@ -32,3 +40,7 @@ jobs:
 
     - name: build
       run: go build ./...
+
+    # Last, so a new advisory does not hide whether the code itself passes.
+    - name: govulncheck
+      run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

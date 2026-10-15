@@ -13,13 +13,22 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          go-version-file: go.mod
+          persist-credentials: false
 
-      - uses: ko-build/setup-ko@v0.10
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          # Not the go directive, the oldest Go the module builds with: the
+          # image ships the standard library of the Go it is built with.
+          # check-latest skips an older patch cached on the runner.
+          go-version: '1.27.x'
+          check-latest: true
+          # A restored build cache is what another run saved, and its objects
+          # would end up in the image.
+          cache: false
+
+      - uses: ko-build/setup-ko@61b4d1d396f5b2e7d6bb6fefdce3dc38d1a13445 # v0.10
 
       # ghcr rejects upper-case path segments, the owner is VizzleTF.
       - name: Resolve image repository
@@ -27,7 +36,9 @@ jobs:
         run: echo "value=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
       - name: Log in to ghcr
-        run: echo '${{ secrets.GITHUB_TOKEN }}' | ko login ghcr.io --username '${{ github.actor }}' --password-stdin
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GITHUB_TOKEN" | ko login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
       - name: Build and push
         env:
