@@ -218,6 +218,7 @@ func TestAdjustEndpoints(t *testing.T) {
 		endpoint("ok.foobar.com", webhookapi.RecordTypeCNAME, "a.foobar.com"),
 		endpoint("multi.foobar.com", webhookapi.RecordTypeA, "1.1.1.1", "2.2.2.2 bank.com"),
 		endpoint("blank.foobar.com", webhookapi.RecordTypeA, ""),
+		endpoint("v6.foobar.com", webhookapi.RecordTypeA, "fd00::5"),
 	})
 	if len(adjusted) != 1 || adjusted[0].DNSName != "ok.foobar.com" {
 		t.Errorf("invalid endpoints kept: %v", adjusted)

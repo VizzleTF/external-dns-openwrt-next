@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/lucirpc"
 	"log/slog"
@@ -112,6 +113,16 @@ func (o *openWRT) parseSection(options map[string]any) (DNSRecord, bool) {
 		record.Type = RecordTypeA
 		record.Name = stringOption(options, optionName)
 		record.Value = stringOption(options, optionIP)
+		// dnsmasq serves an IPv6 address, an IPv4-mapped one too, as AAAA. As an
+		// A record it would be deleted to make way for the cluster's A records
+		// for the name. A value that is no address at all stays: dnsmasq serves
+		// nothing for it, or, holding whitespace or a newline, an A record for
+		// whatever name follows, which sync has to be able to delete.
+		if addr, err := netip.ParseAddr(record.Value); err == nil && !addr.Is4() {
+			o.log.Debug("skipping domain section dnsmasq serves as AAAA",
+				slog.String("name", record.Name), slog.String("ip", record.Value))
+			return DNSRecord{}, false
+		}
 	case sectionTypeCName:
 		record.Type = RecordTypeCNAME
 		record.Name = stringOption(options, optionCName)
@@ -127,7 +138,9 @@ func (o *openWRT) parseSection(options map[string]any) (DNSRecord, bool) {
 		return DNSRecord{}, false
 	}
 
-	return record, true
+	// The plan compares targets without dropping a trailing dot, so a
+	// `Real.LAN.` typed into LuCI would never match the `real.lan` asked for.
+	return record.canonical(), true
 }
 
 // stringOption reads a UCI option expected to be a plain string. Missing

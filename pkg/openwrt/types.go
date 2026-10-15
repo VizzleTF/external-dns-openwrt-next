@@ -2,6 +2,7 @@ package openwrt
 
 import (
 	"fmt"
+	"net/netip"
 	"slices"
 	"strings"
 )
@@ -105,6 +106,13 @@ func (r DNSRecord) Validate() error {
 	}
 	if tooLong(c.Value) {
 		return fmt.Errorf("%s record value %q is longer than DNS allows", r.Type, r.Value)
+	}
+	// dnsmasq serves anything else in a domain section not at all or as AAAA,
+	// and parseSection leaves an AAAA out, so it would be added on every run.
+	if r.Type == RecordTypeA {
+		if addr, err := netip.ParseAddr(c.Value); err != nil || !addr.Is4() {
+			return fmt.Errorf("%s record value %q is not an IPv4 address", r.Type, r.Value)
+		}
 	}
 	return nil
 }

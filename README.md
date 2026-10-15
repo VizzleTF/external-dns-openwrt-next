@@ -16,8 +16,8 @@ For examples of creating DNS records via CRDs or via Ingress/Service annotations
   `AAAA` from a dual-stack Service, `PTR`, the rest — is dropped, with a warning,
   before it reaches the plan. See [Supported records](#supported-records).
 - Names and targets are printable ASCII without spaces, `,`, `"` or `#`, at
-  most 253 characters with labels of at most 63. An endpoint holding anything
-  else is dropped the same way.
+  most 253 characters with labels of at most 63, and an `A` target is an IPv4
+  address. An endpoint holding anything else is dropped the same way.
 - Per-record TTLs are not supported. UCI `domain`/`cname` sections carry no TTL —
   dnsmasq answers them with its global `local_ttl` — so `Records()` reports a
   fixed 300 and a requested TTL is stripped rather than planned on every run.
@@ -294,6 +294,12 @@ prometheus/client_golang would be the only third-party code in the binary.
 
 `A` and `CNAME` only. Anything else is dropped in `AdjustEndpoints` with a
 warning rather than being planned and silently skipped on every run.
+
+A `domain` section holding an IPv6 address, `::ffff:a.b.c.d` included, is an
+`AAAA` record to dnsmasq, so `Records()` leaves it out whatever the ownership
+setting: it is never planned against the cluster's `A` records for the name,
+and never deleted. An `A` endpoint whose target is not an IPv4 address is
+dropped, since dnsmasq would serve it as `AAAA` or not at all.
 
 Per-record TTLs are not supported either — `domain`/`cname` sections have no TTL
 field and dnsmasq answers them from its global `local_ttl` — so a TTL on the

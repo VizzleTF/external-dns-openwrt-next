@@ -62,6 +62,24 @@
   added next to it and dnsmasq answers both. It is still written, since
   refusing would keep two instances from sharing a name, but now with a
   warning.
+- **A `domain` section for an IPv6 address could be deleted.** dnsmasq serves
+  one as `AAAA`, an IPv4-mapped `::ffff:a.b.c.d` too, as checked on OpenWrt
+  24.10 and 25.12, but it was reported as an `A` record. With ownership off and
+  `registry: noop`, a cluster publishing an `A` record for the same name
+  planned it away: a `nas.lan` typed into LuCI for `fd00::5` was replaced by
+  the cluster's address. Such a section is now left out of `Records()`,
+  whatever the ownership setting. An `A` endpoint whose target is not an IPv4
+  address is dropped in `AdjustEndpoints` with a warning, since dnsmasq would
+  serve it as `AAAA` or not at all and the record would be added again on
+  every run; a section already written for one is no longer reported either,
+  so remove it by hand if it is not wanted. A `domain` section whose `ip` is
+  no address at all is still reported: dnsmasq serves nothing for it, or, if
+  it holds whitespace or a newline, an `A` record for whatever name follows,
+  and `policy: sync` has to be able to delete that.
+- **A CNAME target spelled with a trailing dot was updated on every run.** The
+  plan compares targets ignoring case but not the dot, so a `Real.LAN.` typed
+  into LuCI never matched the `real.lan` asked for. Sections are now reported in
+  the canonical spelling this provider writes them in.
 
 ## v0.8.0
 
