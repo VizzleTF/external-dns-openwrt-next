@@ -114,6 +114,26 @@
   place, with the same update planned on every run. They now cancel out only
   when they appear as often on both sides: the update deletes both sections and
   writes one back.
+- **A change set ExternalDNS gave up on stopped halfway.** ExternalDNS waits
+  `--webhook-provider-read-timeout` plus `--webhook-provider-write-timeout`,
+  15 s by default, for an answer, while one call to LuCI may take that long on
+  its own and a change set makes several per record. When a slow router or a
+  large first sync outlasted it, ExternalDNS dropped the request and exited,
+  and the change set was cancelled at its next call to the router. What it had
+  staged was never committed, but `get_all` in the same router session returns
+  it, so the next plan found nothing to do while dnsmasq served none of it,
+  until a later change set committed it in passing. A change set now runs to
+  the end once it has started, and change sets run one at a time, so the one
+  the restarted ExternalDNS sends cannot write the same records again beside
+  it, a second CNAME for an alias, which dnsmasq does not start with,
+  included. The README promised a 500 and a retry here; it now says what
+  ExternalDNS does: a 500–510 is tried again on its next run, and any other
+  failure, a timeout included, makes it exit. Raise
+  `--webhook-provider-write-timeout` if a change set needs longer.
+- Responses no longer carry `Vary: Content-Type`. The body depends on the
+  request's `Accept`, not its `Content-Type`, nothing between ExternalDNS and
+  the webhook caches it, and the upstream webhook server sends no `Vary`
+  either.
 
 ## v0.8.0
 

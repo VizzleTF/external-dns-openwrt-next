@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/metrics"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhookapi"
@@ -41,6 +43,20 @@ func (f *fakeProvider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) []*webh
 		return f.adjustTo
 	}
 	return endpoints
+}
+
+// blockingProvider holds each ApplyChanges until the test releases it, and then
+// fails the way a real backend does once its context is gone.
+type blockingProvider struct {
+	fakeProvider
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingProvider) ApplyChanges(ctx context.Context, _ *webhookapi.Changes) error {
+	p.entered <- struct{}{}
+	<-p.release
+	return ctx.Err()
 }
 
 func newServer(provider Provider) http.Handler {
@@ -100,7 +116,8 @@ func TestRecordsReturnsEndpointsWithTheVersionedMediaType(t *testing.T) {
 	if got := res.Header().Get("Content-Type"); got != testMediaType {
 		t.Errorf("content-type: got %q", got)
 	}
-	if got := res.Header().Get("Vary"); got != "Content-Type" {
+	// The body depends on Accept, not Content-Type, and nothing caches it.
+	if got := res.Header().Get("Vary"); got != "" {
 		t.Errorf("vary: got %q", got)
 	}
 
@@ -130,6 +147,58 @@ func TestApplyChangesAnswers204AndForwardsTheChangeSet(t *testing.T) {
 	if got := provider.applied.Create[0].Targets[0]; got != "1.2.3.4" {
 		t.Errorf("target: got %q", got)
 	}
+}
+
+func TestApplyChangesFinishesAfterTheClientGivesUp(t *testing.T) {
+	provider := &blockingProvider{entered: make(chan struct{}), release: make(chan struct{})}
+	body := `{"Create":[{"dnsName":"a.example.com","targets":["1.2.3.4"],"recordType":"A"}]}`
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/records", strings.NewReader(body))
+	req.Header.Set("Content-Type", testMediaType)
+	res := httptest.NewRecorder()
+
+	served := make(chan struct{})
+	go func() {
+		newServer(provider).ServeHTTP(res, req)
+		close(served)
+	}()
+
+	<-provider.entered
+	// What net/http does when the ExternalDNS client times out and closes the
+	// connection mid-apply.
+	cancel()
+	provider.release <- struct{}{}
+	<-served
+
+	if res.Code != http.StatusNoContent {
+		t.Fatalf("status: got %d, want 204", res.Code)
+	}
+}
+
+func TestChangeSetsAreAppliedOneAtATime(t *testing.T) {
+	provider := &blockingProvider{entered: make(chan struct{}), release: make(chan struct{})}
+	handler := newServer(provider)
+	body := `{"Create":[{"dnsName":"a.example.com","targets":["1.2.3.4"],"recordType":"A"}]}`
+	apply := func() {
+		do(t, handler, http.MethodPost, "/records", body, map[string]string{"Content-Type": testMediaType})
+	}
+
+	var wg sync.WaitGroup
+	wg.Go(apply)
+	<-provider.entered
+	wg.Go(apply)
+
+	select {
+	case <-provider.entered:
+		t.Fatal("a second change set started while the first was being applied")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	provider.release <- struct{}{}
+	<-provider.entered
+	provider.release <- struct{}{}
+	wg.Wait()
 }
 
 func TestNegotiateServesTheDomainFilter(t *testing.T) {

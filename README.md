@@ -251,9 +251,21 @@ Set `ROUTER_ADDRESS=0.0.0.0` to run the webhook outside the ExternalDNS pod.
 Nothing in it is safe to expose beyond a trusted network.
 
 `/healthz` answers for the process, not for the router: an unreachable LuCI is
-reported as a 500 on `/records`, which ExternalDNS retries, and as
-`http_requests_total{status="500"}`. Failing the probe instead would restart a
-pod that is working correctly and would not bring the router back.
+reported as a 500 on `/records` and as `http_requests_total{status="500"}`.
+Failing the probe instead would restart a pod that is working correctly and
+would not bring the router back.
+
+Past the negotiation at startup, ExternalDNS sends each request once. It logs a
+500–510 as a soft error and tries again on its next run. Any other failure —
+another status, a refused connection, or a request still unanswered after
+`--webhook-provider-read-timeout` plus `--webhook-provider-write-timeout` (5 s
+and 10 s by default) — makes it exit, and its container restarts. One call to
+LuCI may take `PROVIDER_OPENWRT_LUCIRPC_TIMEOUT`, 15 s by default, and a change
+set makes several per record, so a slow router or a large first sync can end
+that way rather than in a 500: raise `--webhook-provider-write-timeout` if it
+does. A change set ExternalDNS gave up on is still applied to the end, and the
+one the restarted ExternalDNS sends waits for it rather than writing the same
+records a second time.
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
@@ -290,7 +302,7 @@ scrape it through
 | Metric | Type | What it tells you |
 | ------ | ---- | ----------------- |
 | `external_dns_openwrt_build_info{version,goversion}` | gauge | Always 1. `version` comes from the build info ko stamps in. |
-| `external_dns_openwrt_http_requests_total{route,status}` | counter | Provider API traffic. ExternalDNS retries a 5xx and gives up on a 4xx, so a rising non-200 rate is the first sign the router is unreachable. |
+| `external_dns_openwrt_http_requests_total{route,status}` | counter | Provider API traffic. A climbing 500 count is the first sign the router is unreachable. ExternalDNS tries a 500–510 again on its next run and exits on any other failure, see [Two listeners](#two-listeners). |
 | `external_dns_openwrt_http_request_duration_seconds_total{route}` | counter | Seconds spent serving each route; divide by the request count for the mean. A LuCI call on a busy router is the slow part. |
 | `external_dns_openwrt_records` | gauge | Records the router reported on the last `Records` call — with ownership on, the ones carrying the marker. |
 | `external_dns_openwrt_planned_endpoints_total{action}` | counter | Endpoints ExternalDNS asked for, by `create`/`update`/`delete`. Flat lines are a quiet cluster; a steady climb is a plan that never converges. |

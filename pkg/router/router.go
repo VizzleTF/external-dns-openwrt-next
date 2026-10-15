@@ -60,8 +60,8 @@ func New(config *Config, log *slog.Logger, registry *metrics.Registry, register 
 }
 
 // httpMetrics counts what the access log already prints, so an operator can
-// alert on it: ExternalDNS retries a 5xx and gives up on a 4xx, and neither
-// shows up anywhere else.
+// alert on it: ExternalDNS tries a 500–510 again on its next run and exits on
+// any other failure, and neither shows up anywhere else.
 type httpMetrics struct {
 	requests *metrics.Counter
 	duration *metrics.Counter

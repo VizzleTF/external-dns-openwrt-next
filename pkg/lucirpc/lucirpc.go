@@ -73,7 +73,8 @@ func New(config *Config, log *slog.Logger) LuciRPC {
 	httpClient := &http.Client{
 		// The dial timeout alone only bounds connection setup. Without a
 		// client timeout a router that accepts the connection and then stalls
-		// would block the request until ExternalDNS gives up on its side.
+		// would hold a change set, which runs on after ExternalDNS gives up,
+		// and every one queued behind it, forever.
 		Timeout: timeout,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{
