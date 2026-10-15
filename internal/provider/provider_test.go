@@ -209,6 +209,20 @@ func TestAdjustEndpoints(t *testing.T) {
 		t.Errorf("unsupported types kept: %v", adjusted)
 	}
 
+	// Passed through, any of these would fail ApplyChanges and every change
+	// planned with it. One bad target drops the whole endpoint: the others
+	// alone are not the record that was asked for.
+	adjusted = p.AdjustEndpoints([]*webhookapi.Endpoint{
+		endpoint("evil.foobar.com", webhookapi.RecordTypeCNAME, "x.lan\naddress=/bank.com/6.6.6.6"),
+		endpoint("bank.com#.foobar.com", webhookapi.RecordTypeA, "6.6.6.6"),
+		endpoint("ok.foobar.com", webhookapi.RecordTypeCNAME, "a.foobar.com"),
+		endpoint("multi.foobar.com", webhookapi.RecordTypeA, "1.1.1.1", "2.2.2.2 bank.com"),
+		endpoint("blank.foobar.com", webhookapi.RecordTypeA, ""),
+	})
+	if len(adjusted) != 1 || adjusted[0].DNSName != "ok.foobar.com" {
+		t.Errorf("invalid endpoints kept: %v", adjusted)
+	}
+
 	// dnsmasq serves every record with its global local_ttl.
 	ttl := endpoint("a.foobar.com", webhookapi.RecordTypeA, "1.1.1.1")
 	ttl.RecordTTL = 60

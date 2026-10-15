@@ -15,6 +15,9 @@ For examples of creating DNS records via CRDs or via Ingress/Service annotations
 - Supported DNS record types: `A`, `CNAME`. Anything else ExternalDNS asks for —
   `AAAA` from a dual-stack Service, `PTR`, the rest — is dropped, with a warning,
   before it reaches the plan. See [Supported records](#supported-records).
+- Names and targets are printable ASCII without spaces, `,`, `"` or `#`, at
+  most 253 characters with labels of at most 63. An endpoint holding anything
+  else is dropped the same way.
 - Per-record TTLs are not supported. UCI `domain`/`cname` sections carry no TTL —
   dnsmasq answers them with its global `local_ttl` — so `Records()` reports a
   fixed 300 and a requested TTL is stripped rather than planned on every run.
@@ -244,7 +247,7 @@ scrape it through
 | `external_dns_openwrt_planned_endpoints_total{action}` | counter | Endpoints ExternalDNS asked for, by `create`/`update`/`delete`. Flat lines are a quiet cluster; a steady climb is a plan that never converges. |
 | `external_dns_openwrt_apply_changes_total{result}` | counter | Change sets applied, `success` or `error`. |
 | `external_dns_openwrt_last_apply_success_timestamp_seconds` | gauge | When a change set last reached the router. `time() - <metric>` is the alert worth having. |
-| `external_dns_openwrt_dropped_endpoints_total{record_type}` | counter | Endpoints dropped in `AdjustEndpoints`, by type — `AAAA` from a dual-stack Service, `PTR` from `--create-ptr`, anything UCI has no section for. The type is the actionable part: it says which flag to narrow. |
+| `external_dns_openwrt_dropped_endpoints_total{record_type}` | counter | Endpoints dropped in `AdjustEndpoints`, by type — `AAAA` from a dual-stack Service, `PTR` from `--create-ptr`, anything UCI has no section for, and `A`/`CNAME` with a name or target dnsmasq cannot take. The type is the actionable part: it says which flag to narrow, or that an annotation needs fixing. |
 
 No client library: the exposition format is a few lines per metric, and
 prometheus/client_golang would be the only third-party code in the binary.
@@ -257,6 +260,16 @@ warning rather than being planned and silently skipped on every run.
 Per-record TTLs are not supported either — `domain`/`cname` sections have no TTL
 field and dnsmasq answers them from its global `local_ttl` — so a TTL on the
 desired endpoint is stripped for the same reason.
+
+An endpoint whose name or any target holds whitespace, a control character, a
+non-ASCII byte, `,`, `"` or `#`, or a label over 63 characters, is dropped too,
+as is a name over 253. The init script copies UCI values into dnsmasq's config
+and hostfile verbatim: a newline starts a directive of its own, a comma adds a
+CNAME alias, `#` starts a comment, and a stray quote, a non-ASCII byte or an
+overlong label in a CNAME keeps dnsmasq from starting. Dropping the endpoint
+keeps it from failing the change set it arrives in. A section that already
+holds one is still reported, so `policy: sync` with `registry: noop` deletes it;
+anywhere else, remove it on the router by hand.
 
 ### What the annotations do here
 

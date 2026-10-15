@@ -58,16 +58,20 @@ func (p *Provider) ApplyChanges(ctx context.Context, changes *webhookapi.Changes
 // AdjustEndpoints trims the desired state down to what this provider can
 // actually represent.
 //
-// Both adjustments exist to stop the plan from churning. ExternalDNS compares
-// the desired endpoints with what Records() reports, so anything the provider
-// silently drops at write time would be re-planned on every single run:
+// The adjustments exist to stop the plan from churning or jamming. ExternalDNS
+// compares the desired endpoints with what Records() reports, so anything the
+// provider silently drops at write time would be re-planned on every single
+// run, and anything it refuses at write time fails the whole change set:
 //
 //   - record types other than A and CNAME cannot be written to UCI at all;
+//   - a name or target that fails openwrt.DNSRecord.Validate would fail every
+//     other change planned with it, on every retry;
 //   - per-record TTLs do not exist in `domain`/`cname` sections, so an endpoint
 //     asking for one would never match what Records() reports.
 func (p *Provider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) []*webhookapi.Endpoint {
 	adjusted := make([]*webhookapi.Endpoint, 0, len(endpoints))
 
+next:
 	for _, ep := range endpoints {
 		if ep == nil {
 			continue
@@ -79,6 +83,14 @@ func (p *Provider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) []*webhooka
 			p.log.Warn("dropping endpoint, record type not supported by this provider",
 				slog.String("name", ep.DNSName), slog.String("type", ep.RecordType))
 			continue
+		}
+
+		for _, target := range ep.Targets {
+			if err := (openwrt.DNSRecord{Type: ep.RecordType, Name: ep.DNSName, Value: target}).Validate(); err != nil {
+				p.log.Warn("dropping endpoint, it cannot be written to the router",
+					slog.String("name", ep.DNSName), slog.String("type", ep.RecordType), slog.Any("error", err))
+				continue next
+			}
 		}
 
 		if ep.RecordTTL > 0 {
