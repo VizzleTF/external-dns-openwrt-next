@@ -7,6 +7,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/metrics"
@@ -16,18 +17,17 @@ import (
 const (
 	headerContentType = "Content-Type"
 	headerAccept      = "Accept"
-	headerVary        = "Vary"
 
 	contentTypePlaintext = "text/plain"
 
 	// mediaType is the only version of the webhook contract that exists.
 	mediaType = "application/external.dns.webhook+json;version=1"
 
-	// DefaultMaxBodyBytes mirrors the ExternalDNS default for
-	// --webhook-provider-max-body-size. The controller caps what it reads from
-	// this webhook; the cap here is the other half of that bargain, so a body
-	// that is never going to be a plausible change set cannot be streamed into
-	// memory before the decoder gives up.
+	// DefaultMaxBodyBytes mirrors the default of
+	// --webhook-provider-max-body-size, with which ExternalDNS v0.23.0 and
+	// later cap what they read from this webhook; the cap here is the other
+	// half of that bargain, so a body that is never going to be a plausible
+	// change set cannot be streamed into memory before the decoder gives up.
 	DefaultMaxBodyBytes int64 = 32 << 20
 )
 
@@ -48,6 +48,16 @@ type Webhook struct {
 
 	// maxBodyBytes caps a decoded request body.
 	maxBodyBytes int64
+
+	// applyMu runs one change set at a time. A change set outlives the
+	// ExternalDNS process that gave up on it, and the restarted one sends its
+	// own: side by side, both would read the router before either wrote and add
+	// the same records twice, a second CNAME for an alias, which dnsmasq does
+	// not start with, included. Records takes no lock: waiting here would time
+	// out the restarted ExternalDNS as well, and what a plan made against a
+	// router mid-change repeats of the change set under way, the provider finds
+	// done when its turn comes, as it reads the router again.
+	applyMu sync.Mutex
 }
 
 // webhookMetrics is what this layer can measure that the HTTP access log
@@ -144,7 +154,13 @@ func (w *Webhook) ApplyChanges(rw http.ResponseWriter, req *http.Request) {
 	w.metrics.planned.Add(float64(len(changes.UpdateNew)), "update")
 	w.metrics.planned.Add(float64(len(changes.Delete)), "delete")
 
-	if err := w.provider.ApplyChanges(req.Context(), &changes); err != nil {
+	// ExternalDNS gives up after its read plus write timeout, 15 s by default,
+	// and a change set cut off there would leave writes staged on the router
+	// for the next commit to carry. Finish it instead.
+	w.applyMu.Lock()
+	defer w.applyMu.Unlock()
+
+	if err := w.provider.ApplyChanges(context.WithoutCancel(req.Context()), &changes); err != nil {
 		w.metrics.applied.Inc("error")
 		w.reject(rw, http.StatusInternalServerError, "error applying changes", slog.Any("error", err))
 		return
@@ -252,7 +268,6 @@ func (w *Webhook) decode(rw http.ResponseWriter, req *http.Request, target any) 
 
 func (w *Webhook) writeJSON(rw http.ResponseWriter, status int, body any) {
 	rw.Header().Set(headerContentType, mediaType)
-	rw.Header().Set(headerVary, headerContentType)
 	rw.WriteHeader(status)
 
 	if err := json.NewEncoder(rw).Encode(body); err != nil {
