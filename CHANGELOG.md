@@ -35,6 +35,34 @@
   every session, LuCI web logins included; the webhook gets a 403 and logs in
   again on its next call. Checked on OpenWrt 24.10 and 25.12.
 
+### Fixed
+
+- **A CNAME could keep dnsmasq from starting.** dnsmasq refuses a second CNAME
+  for an alias, even one with the same target or spelled in another case
+  (`duplicate CNAME`), and any CNAME loop, an alias pointing at itself included
+  (`CNAME loop involving …`). Either way it logs `FAILED to start up` and takes
+  DNS and DHCP for the whole LAN down with it, after a reboot too. Checked on
+  OpenWrt 24.10 and 25.12. Several things led there: a CNAME endpoint with two
+  targets; two endpoints for one name with different set identifiers; an alias
+  that a section typed into LuCI, or owned by another instance, already held;
+  every CNAME after `PROVIDER_OPENWRT_OWNERSHIPID` changed; and a target leading
+  back to the alias. A CNAME is now skipped with a warning when another
+  section already holds its alias, with another target under any owner or with
+  the same one under another ID, or when it would close a loop through any
+  CNAMEs on the router; an identical unmarked section is adopted as before. The
+  rest of the change set goes through, since an error instead would block every
+  other change on each retry. ExternalDNS asks for the skipped record again on
+  every run, but nothing is committed and dnsmasq is not restarted for it. A router already in that state needs the extra
+  section removed by hand: `uci delete dhcp.<section>`, `uci commit dhcp` and
+  `/etc/init.d/dnsmasq restart`. The README now says how to change the
+  ownership ID without orphaning records.
+- **A second A record next to one the provider cannot see is now logged.**
+  With ownership on, a section for the same name that carries no marker, or
+  another ID, is invisible to ExternalDNS, so a record for another address is
+  added next to it and dnsmasq answers both. It is still written, since
+  refusing would keep two instances from sharing a name, but now with a
+  warning.
+
 ## v0.8.0
 
 A pass for over-engineering: what the code carried without needing it is gone.

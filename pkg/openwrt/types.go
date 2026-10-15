@@ -25,7 +25,7 @@ const (
 // DNSRecord is a single DNS record, one UCI section.
 //
 // A `domain` section maps to an A record and a `cname` section to a CNAME; each
-// holds exactly one value, so an endpoint with several targets spans several
+// holds exactly one value, so an A endpoint with several targets spans several
 // sections.
 type DNSRecord struct {
 	Type string

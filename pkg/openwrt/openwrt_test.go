@@ -1,6 +1,7 @@
 package openwrt
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -74,6 +75,28 @@ func domainSection(name, ip, owner string) map[string]any {
 
 func aRecord(name, ip string) DNSRecord {
 	return DNSRecord{Type: RecordTypeA, Name: name, Value: ip}
+}
+
+func cnameSection(alias, target, owner string) map[string]any {
+	return section(sectionTypeCName, alias, target, owner)
+}
+
+func cnameRecord(alias, target string) DNSRecord {
+	return DNSRecord{Type: RecordTypeCNAME, Name: alias, Value: target}
+}
+
+// warnings swaps the provider's logger for one that keeps warnings and above.
+func warnings(o *openWRT) *bytes.Buffer {
+	var buf bytes.Buffer
+	o.log = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	return &buf
+}
+
+func assertWarned(t *testing.T, logged *bytes.Buffer, want string) {
+	t.Helper()
+	if want == "" && logged.Len() > 0 || !strings.Contains(logged.String(), want) {
+		t.Errorf("warnings: got %q, want %q", logged, want)
+	}
 }
 
 // owning builds a provider scoped to its own records, with adoption on.
@@ -248,6 +271,156 @@ func TestAdding(t *testing.T) {
 		}
 		assertCalls(t, rpc, getAll)
 	})
+}
+
+// Every skip below is a case checked on OpenWrt 24.10 and 25.12: written, it
+// keeps dnsmasq from starting.
+func TestNeverWritingACNAMEThatStopsDnsmasq(t *testing.T) {
+	const taken, loops = "its alias already has one", "would close a CNAME loop"
+	stamp := "uci set dhcp cfg01 " + ownershipOption + " " + testOwner
+	writes := func(alias, target string) []string {
+		return []string{"uci add dhcp cname",
+			"uci set dhcp cfg01 cname " + alias, "uci set dhcp cfg01 target " + target, stamp}
+	}
+
+	for _, tc := range []struct {
+		name        string
+		sections    map[string]map[string]any
+		provider    func(*fakeRPC) *openWRT
+		remove, add []DNSRecord
+		want        []string
+		warning     string
+	}{
+		{
+			// A CNAME endpoint with two targets, or two endpoints for one name
+			// with different set identifiers.
+			name: "writes one of two CNAMEs for the same alias in a change set",
+			add:  []DNSRecord{cnameRecord("a.lan", "t1.lan"), cnameRecord("A.lan.", "t2.lan")},
+			want: slices.Concat([]string{getAll}, writes("a.lan", "t1.lan"), []string{commit, restart}),
+			// The second one is skipped.
+			warning: taken,
+		},
+		{
+			name:     "skips an alias a manual section holds with another target",
+			sections: map[string]map[string]any{"manual": cnameSection("a.lan", "other.lan", "")},
+			add:      []DNSRecord{cnameRecord("a.lan", "t1.lan")},
+			want:     []string{getAll},
+			warning:  taken,
+		},
+		{
+			// Also what is left behind after the ownership ID changes.
+			name:     "skips an alias another instance holds, even with the same target",
+			sections: map[string]map[string]any{"theirs": cnameSection("a.lan", "t1.lan", "other-instance")},
+			add:      []DNSRecord{cnameRecord("a.lan", "t1.lan")},
+			want:     []string{getAll},
+			warning:  taken,
+		},
+		{
+			name:     "skips an alias held with another target when ownership is disabled",
+			sections: map[string]map[string]any{"manual": cnameSection("A.LAN", "other.lan", "")},
+			provider: unscoped,
+			add:      []DNSRecord{cnameRecord("a.lan", "t1.lan")},
+			want:     []string{getAll},
+			warning:  taken,
+		},
+		{
+			name:     "still adopts an identical unowned CNAME",
+			sections: map[string]map[string]any{"existing": cnameSection("a.lan", "T1.lan.", "")},
+			add:      []DNSRecord{cnameRecord("a.lan", "t1.lan")},
+			want:     []string{getAll, "uci set dhcp existing " + ownershipOption + " " + testOwner, commit, restart},
+		},
+		{
+			// Removals run first, so the section being replaced is out of the
+			// way by the time the new target is added.
+			name:     "changes the target of its own CNAME",
+			sections: map[string]map[string]any{"mine": cnameSection("a.lan", "t1.lan", testOwner)},
+			remove:   []DNSRecord{cnameRecord("a.lan", "t1.lan")},
+			add:      []DNSRecord{cnameRecord("a.lan", "t2.lan")},
+			want:     slices.Concat([]string{getAll, "uci delete dhcp mine"}, writes("a.lan", "t2.lan"), []string{commit, restart}),
+		},
+		{
+			name:    "skips a CNAME onto itself",
+			add:     []DNSRecord{cnameRecord("a.lan", "A.lan.")},
+			want:    []string{getAll},
+			warning: loops,
+		},
+		{
+			name: "skips a CNAME closing a loop through sections it does not own",
+			sections: map[string]map[string]any{
+				"theirs": cnameSection("b.lan", "C.lan", "other-instance"),
+				"manual": cnameSection("c.lan", "a.lan", ""),
+			},
+			add:     []DNSRecord{cnameRecord("a.lan", "b.lan")},
+			want:    []string{getAll},
+			warning: loops,
+		},
+		{
+			name:    "skips the second of two CNAMEs in a change set that would loop",
+			add:     []DNSRecord{cnameRecord("a.lan", "b.lan"), cnameRecord("b.lan", "a.lan")},
+			want:    slices.Concat([]string{getAll}, writes("a.lan", "b.lan"), []string{commit, restart}),
+			warning: loops,
+		},
+		{
+			name: "writes a CNAME onto a chain that does not loop",
+			sections: map[string]map[string]any{
+				"one": cnameSection("b.lan", "c.lan", ""),
+				"two": cnameSection("d.lan", "c.lan", ""),
+			},
+			add:  []DNSRecord{cnameRecord("a.lan", "b.lan")},
+			want: slices.Concat([]string{getAll}, writes("a.lan", "b.lan"), []string{commit, restart}),
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.provider == nil {
+				tc.provider = owning
+			}
+			rpc := &fakeRPC{sections: tc.sections}
+			o := tc.provider(rpc)
+			logged := warnings(o)
+
+			if err := o.ApplyDNSRecords(context.Background(), tc.remove, tc.add); err != nil {
+				t.Fatal(err)
+			}
+			assertCalls(t, rpc, tc.want...)
+			assertWarned(t, logged, tc.warning)
+		})
+	}
+}
+
+// Two A sections for one name make dnsmasq answer both addresses. Refusing to
+// write would keep two instances from sharing a name, so it is only logged.
+func TestAddingNextToAnAddressItDoesNotOwn(t *testing.T) {
+	const answersBoth = "dnsmasq will answer both"
+
+	for _, tc := range []struct {
+		name     string
+		provider func(*fakeRPC) *openWRT
+		other    map[string]any
+		warning  string
+	}{
+		{"warns about a manual section", owning, domainSection("NAS.lan", "10.0.0.5", ""), answersBoth},
+		{"warns about another instance's section", owning, domainSection("nas.lan", "10.0.0.5", "other-instance"), answersBoth},
+		{"does not warn about another instance's same address", owning, domainSection("nas.lan", "10.0.0.6", "other-instance"), ""},
+		{"does not warn about its own other address", owning, domainSection("nas.lan", "10.0.0.5", testOwner), ""},
+		// Every section is then reported, so the plan sees the other address.
+		{"does not warn when ownership is disabled", unscoped, domainSection("nas.lan", "10.0.0.5", ""), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rpc := &fakeRPC{sections: map[string]map[string]any{"other": tc.other}}
+			o := tc.provider(rpc)
+			logged := warnings(o)
+
+			if err := o.ApplyDNSRecords(context.Background(), nil, []DNSRecord{aRecord("nas.lan", "10.0.0.6")}); err != nil {
+				t.Fatal(err)
+			}
+			want := []string{getAll, "uci add dhcp domain", "uci set dhcp cfg01 name nas.lan", "uci set dhcp cfg01 ip 10.0.0.6"}
+			if o.ownershipEnabled() {
+				want = append(want, "uci set dhcp cfg01 "+ownershipOption+" "+testOwner)
+			}
+			assertCalls(t, rpc, append(want, commit, restart)...)
+			assertWarned(t, logged, tc.warning)
+		})
+	}
 }
 
 func TestValidate(t *testing.T) {
