@@ -4,6 +4,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # A week for a hijacked action release to be caught before it is proposed
+    # here and runs with release.yaml's packages: write.
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns:
