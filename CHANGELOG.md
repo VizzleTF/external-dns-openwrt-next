@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.8.1
+
+### Security
+
+- **A record name or target could rewrite dnsmasq's configuration.** The
+  OpenWrt init script copies `domain` and `cname` sections into dnsmasq's
+  config and hostfile verbatim, and nothing here checked what they held. A
+  `target` annotation of `x.lan`, a newline and `address=/bank.com/6.6.6.6`
+  answered `bank.com` for the whole LAN; a hostname of `bank.com#.lan` got past
+  a `.lan` domain filter and was served as `bank.com`, since `#` starts a
+  comment in a hostfile; and a `"`, a DEL, any non-ASCII byte or a label over
+  63 characters in a CNAME kept dnsmasq from starting at all, taking DNS and
+  DHCP down with it, after a reboot too. Checked on OpenWrt 24.10 and 25.12.
+  Whitespace, control characters, non-ASCII bytes, `,`, `"` and `#` are now
+  refused in names and targets, as are labels over 63 characters and names
+  over 253: `AdjustEndpoints` drops such an endpoint with a warning and counts
+  it in `external_dns_openwrt_dropped_endpoints_total`, so it cannot fail the
+  change set it arrives in either. A section already holding one is still
+  reported, so `registry: noop` with `policy: sync` deletes it on the next run.
+  Anywhere else — `upsert-only`, or the chart's default `txt` registry, which
+  drops every delete — remove it by hand: `uci delete dhcp.<section>`,
+  `uci commit dhcp` and `/etc/init.d/dnsmasq restart`.
+
 ## v0.8.0
 
 A pass for over-engineering: what the code carried without needing it is gone.

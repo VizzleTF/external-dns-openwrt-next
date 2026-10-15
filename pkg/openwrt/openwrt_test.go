@@ -250,6 +250,47 @@ func TestAdding(t *testing.T) {
 	})
 }
 
+func TestValidate(t *testing.T) {
+	label63 := strings.Repeat("a", 63)
+	name253 := strings.Repeat(label63+".", 3) + strings.Repeat("a", 61)
+
+	// Checked on the canonical form, which is what reaches the router.
+	for _, record := range []DNSRecord{
+		aRecord(" Foo.bar.com. ", "1.1.1.1"),
+		aRecord("foo.bar.com", "fd00::5"),
+		{Type: RecordTypeCNAME, Name: "_alias.bar.com", Value: "Target.bar.com."},
+		{Type: RecordTypeCNAME, Name: label63 + ".lan", Value: label63 + ".lan"},
+		aRecord(name253+".", "1.1.1.1"),
+	} {
+		if err := record.Validate(); err != nil {
+			t.Errorf("%q: %v", record, err)
+		}
+	}
+
+	for _, char := range []string{"\n", "\r", "\t", "\x00", " ", ",", `"`, "#", "\x7f", "é"} {
+		for _, record := range []DNSRecord{
+			aRecord("a"+char+"b.lan", "1.1.1.1"),
+			aRecord("foo.lan", "1.1.1.1"+char+"2"),
+			{Type: RecordTypeCNAME, Name: "a" + char + "b.lan", Value: "target.lan"},
+			{Type: RecordTypeCNAME, Name: "alias.lan", Value: "a" + char + "b.lan"},
+		} {
+			if err := record.Validate(); err == nil || !strings.Contains(err.Error(), "dnsmasq cannot take") {
+				t.Errorf("%q: got %v", record, err)
+			}
+		}
+	}
+
+	for _, record := range []DNSRecord{
+		{Type: RecordTypeCNAME, Name: label63 + "a.lan", Value: "target.lan"},
+		{Type: RecordTypeCNAME, Name: "alias.lan", Value: label63 + "a.lan"},
+		aRecord(name253+"a", "1.1.1.1"),
+	} {
+		if err := record.Validate(); err == nil || !strings.Contains(err.Error(), "longer than DNS allows") {
+			t.Errorf("%q: got %v", record, err)
+		}
+	}
+}
+
 func TestDeleting(t *testing.T) {
 	ctx := context.Background()
 
@@ -316,6 +357,16 @@ func TestDeleting(t *testing.T) {
 			},
 			remove: []DNSRecord{aRecord("multi.bar.com", "2.2.2.2")},
 			want:   []string{getAll, "uci delete dhcp drop", commit, restart},
+		},
+		{
+			// Validation guards writes only: a section written before it existed
+			// is exactly the one that has to go.
+			name: "deletes a record that would no longer pass validation",
+			sections: map[string]map[string]any{
+				"poisoned": section(sectionTypeCName, "foo.bar.com", "x.lan\naddress=/bank.com/6.6.6.6", testOwner),
+			},
+			remove: []DNSRecord{{Type: RecordTypeCNAME, Name: "foo.bar.com", Value: "x.lan\naddress=/bank.com/6.6.6.6"}},
+			want:   []string{getAll, "uci delete dhcp poisoned", commit, restart},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

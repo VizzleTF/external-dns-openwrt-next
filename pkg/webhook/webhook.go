@@ -79,7 +79,7 @@ func newWebhookMetrics(registry *metrics.Registry) *webhookMetrics {
 		planned: registry.Counter(metrics.Prefix+"_planned_endpoints_total",
 			"Endpoints ExternalDNS asked this provider to change, by action.", "action"),
 		dropped: registry.Counter(metrics.Prefix+"_dropped_endpoints_total",
-			"Endpoints dropped in AdjustEndpoints, by the record type UCI cannot represent.",
+			"Endpoints dropped in AdjustEndpoints, by record type.",
 			"record_type"),
 		lastSuccess: registry.Gauge(metrics.Prefix+"_last_apply_success_timestamp_seconds",
 			"Unix time of the last change set that reached the router."),
@@ -169,10 +169,11 @@ func (w *Webhook) AdjustEndpoints(rw http.ResponseWriter, req *http.Request) {
 	adjusted := w.provider.AdjustEndpoints(endpoints)
 
 	// What the provider refused to represent — AAAA from a dual-stack Service,
-	// PTR, anything else UCI has no section for. Visible only in the log until
-	// now, and worth an alert when it starts climbing. Broken down by record
-	// type, because the answer ("narrow --managed-record-types", "turn off
-	// --create-ptr") depends on which one it is.
+	// PTR, anything else UCI has no section for, and an A or CNAME whose name
+	// or target dnsmasq cannot take. Visible only in the log until now, and
+	// worth an alert when it starts climbing. Broken down by record type,
+	// because the answer ("narrow --managed-record-types", "turn off
+	// --create-ptr", "fix the annotation") depends on which one it is.
 	for recordType, count := range droppedByType(endpoints, adjusted) {
 		w.metrics.dropped.Add(float64(count), recordType)
 	}

@@ -2,6 +2,7 @@ package openwrt
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -50,9 +51,10 @@ type DNSRecord struct {
 // asking for `nas.lan` are two different records: adoption misses the existing
 // section and writes a second one for a name dnsmasq already answers.
 //
-// Non-ASCII names are passed through as they are. ExternalDNS maps those to
-// punycode via golang.org/x/net/idna, and this binary links no third-party
-// packages; such a name would not resolve through dnsmasq either.
+// Non-ASCII names are passed through as they are, and Validate refuses them.
+// ExternalDNS maps those to punycode via golang.org/x/net/idna, and this binary
+// links no third-party packages; such a name would not resolve through dnsmasq
+// either.
 func CanonicalName(name string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
 }
@@ -92,5 +94,40 @@ func (r DNSRecord) Validate() error {
 	if c.Value == "" {
 		return fmt.Errorf("value is required for a %s record", r.Type)
 	}
+	if strings.ContainsFunc(c.Name, breaksDnsmasq) {
+		return fmt.Errorf("%s record name %q holds a character dnsmasq cannot take", r.Type, r.Name)
+	}
+	if strings.ContainsFunc(c.Value, breaksDnsmasq) {
+		return fmt.Errorf("%s record value %q holds a character dnsmasq cannot take", r.Type, r.Value)
+	}
+	if tooLong(c.Name) {
+		return fmt.Errorf("%s record name %q is longer than DNS allows", r.Type, r.Name)
+	}
+	if tooLong(c.Value) {
+		return fmt.Errorf("%s record value %q is longer than DNS allows", r.Type, r.Value)
+	}
 	return nil
+}
+
+// tooLong reports a name over 253 characters or with a label over 63. dnsmasq
+// refuses such a label in a CNAME and does not start, as checked on OpenWrt
+// 24.10 and 25.12; a longer name cannot be asked for over DNS at all.
+func tooLong(name string) bool {
+	return len(name) > 253 || slices.ContainsFunc(strings.Split(name, "."), func(label string) bool { return len(label) > 63 })
+}
+
+// breaksDnsmasq reports a character dnsmasq reads as syntax or refuses
+// outright, as checked on OpenWrt 24.10 and 25.12. The init script copies UCI
+// values verbatim into `cname=alias,target` config lines and `ip name` hostfile
+// lines:
+//
+//   - a newline starts a directive of its own (`address=/bank.com/6.6.6.6`),
+//     and any whitespace in a domain section adds names to its hostfile line;
+//   - a comma turns a CNAME into several aliases;
+//   - in a CNAME, `"`, DEL or any non-ASCII byte keeps dnsmasq from starting,
+//     and DNS and DHCP for the whole LAN with it, after a reboot too;
+//   - `#` starts a comment in a hostfile, so `bank.com#.lan` gets past a
+//     `.lan` domain filter and is served as `bank.com`.
+func breaksDnsmasq(r rune) bool {
+	return r <= ' ' || r >= 0x7f || r == ',' || r == '"' || r == '#'
 }
