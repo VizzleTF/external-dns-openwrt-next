@@ -34,8 +34,9 @@ For examples of creating DNS records via CRDs or via Ingress/Service annotations
 
 ## What this fork changes
 
-`policy: sync` works: records are created, updated **and** deleted — and with
-ownership enabled it can only ever touch records it created itself.
+`policy: sync` works, with [`registry: noop`](#registry-noop-not-txt): records
+are created, updated **and** deleted — and with ownership enabled it can only
+ever touch records it created itself.
 
 - **Deletions apply.** Upstream matched records by name only and mutated the
   slice it was iterating over, so with more than one record in a change set some
@@ -100,6 +101,26 @@ with the marker — instead of getting a duplicate next to it.
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
 | `PROVIDER_OPENWRT_OWNERSHIPID` | *(empty)* | Marker value. **Empty disables ownership and every section is reported — do not combine that with `policy: sync`.** Give each ExternalDNS instance writing to the same router a distinct ID. |
+
+### Registry: `noop`, not `txt`
+
+The chart defaults to `registry: txt`, which keeps the owner of each record in
+a TXT record beside it. This provider has nowhere to store one, so the `txt`
+registry finds no owner on anything the router reports and drops every update
+and delete from the plan: a changed address or a deleted Service never
+reaches the router, while ExternalDNS logs
+`All records are already up to date`. Set `registry: noop`, which plans
+against `Records()` as reported, and let the marker above decide what that
+holds. With ownership off, `policy: sync` then deletes every record the
+cluster does not ask for.
+
+The [example values](example/values.yaml) do this, and set `domainFilters`
+too. Without a filter, anyone who can create an Ingress or a Service can
+publish any name for the whole LAN; with one, `sync` touches no name outside
+it either.
+
+Use the CRD registry below instead when ownership should live in the cluster
+rather than on the router.
 
 ### Alternative: the CRD registry
 
@@ -263,9 +284,9 @@ and 10 s by default) — makes it exit, and its container restarts. One call to
 LuCI may take `PROVIDER_OPENWRT_LUCIRPC_TIMEOUT`, 15 s by default, and a change
 set makes several per record, so a slow router or a large first sync can end
 that way rather than in a 500: raise `--webhook-provider-write-timeout` if it
-does. A change set ExternalDNS gave up on is still applied to the end, and the
-one the restarted ExternalDNS sends waits for it rather than writing the same
-records a second time.
+does, as the example values do, to 60 s. A change set ExternalDNS gave up on
+is still applied to the end, and the one the restarted ExternalDNS sends waits
+for it rather than writing the same records a second time.
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |

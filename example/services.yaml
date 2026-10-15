@@ -1,11 +1,23 @@
 ---
+# The router password the example values read. Create it out of band anywhere
+# but a throwaway cluster, so that it never lands in a manifest.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: openwrt-luci
+type: Opaque
+stringData:
+  password: admin
+---
 apiVersion: v1
 kind: Service
 metadata:
   name: dummy-cname
   annotations:
     external-dns.kubernetes.io/hostname: cname.foobar.io
-    external-dns.kubernetes.io/target: target.foobar.io
+    # dnsmasq answers a CNAME with an address only for a target it knows
+    # itself, such as the A record below.
+    external-dns.kubernetes.io/target: a.foobar.io
 spec:
   type: LoadBalancer
   ports:

@@ -159,6 +159,40 @@
   saved.
 - golangci-lint v2.13 → v2.14.
 
+### Docs
+
+- **The example deployment never updated or deleted a record.** It set
+  `policy: sync` and no registry, so the chart used `txt`, which keeps owners
+  in TXT records this provider cannot store. No record the router reported had
+  an owner, and the plan dropped every update and delete: a changed address or
+  a deleted Service never reached the router, while ExternalDNS logged
+  `All records are already up to date`. The example now sets `registry: noop`,
+  which plans against what `Records()` reports, and the README says why. A
+  deployment copied from the old example should do the same, with
+  `PROVIDER_OPENWRT_OWNERSHIPID` set first: from then on `sync` deletes what
+  the router reports and the cluster no longer asks for.
+- **The example publishes only under its own domain.** Without
+  `domainFilters`, anyone who could create an Ingress or a Service could
+  answer any name for the whole LAN, and `sync` could delete any name on the
+  router. It now sets `foobar.io`, the domain its Services use.
+- **The example gives a change set a minute.** ExternalDNS waits the read plus
+  the write timeout, 15 s by default, and exits when a request takes longer,
+  while one LuCI call may take 15 s on its own and a change set makes several
+  per record. It now passes `--webhook-provider-write-timeout=60s`.
+- **The router password comes from a Secret.** It was a plain `env` value, so
+  it sat in the values file and in the Deployment for anyone allowed to read
+  either. The example reads it from the `openwrt-luci` Secret, which
+  `example/services.yaml` creates for the local k3d cluster.
+- **The webhook container runs with a security context.** The chart sets one
+  for the ExternalDNS container only. The example now gives the webhook no
+  privilege escalation, a read-only root filesystem, a non-root user and no
+  capabilities; it writes nothing to disk and needs none of them.
+- The example CNAME points at `a.foobar.io`, which the example also publishes.
+  Its target, `target.foobar.io`, existed nowhere, and dnsmasq answers a CNAME
+  whose target it does not know with the CNAME alone and no address.
+- The comment in the example values claimed every variable was at its
+  default. The ownership ID, the router address and the credentials are not.
+
 ## v0.8.0
 
 A pass for over-engineering: what the code carried without needing it is gone.

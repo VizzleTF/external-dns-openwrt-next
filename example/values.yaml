@@ -1,11 +1,24 @@
 logLevel: info
 policy: sync
+# The chart defaults to `txt`, which keeps ownership in TXT records this
+# provider cannot store, so it finds no owner on any record and drops every
+# update and delete from the plan. PROVIDER_OPENWRT_OWNERSHIPID below decides
+# what sync may touch instead.
+registry: noop
+# Without a filter, anyone who can create an Ingress or a Service can answer
+# any name for the whole LAN, and sync can delete any name on the router.
+domainFilters:
+  - foobar.io
 # The default is A,AAAA,CNAME. This provider writes A and CNAME only, so an
 # AAAA endpoint — which any dual-stack Service produces — would be dropped and
 # warned about on every reconcile.
 extraArgs:
   - --managed-record-types=A
   - --managed-record-types=CNAME
+  # ExternalDNS exits on a request unanswered after the read plus the write
+  # timeout, 15 s by default, and a change set makes several LuCI calls per
+  # record.
+  - --webhook-provider-write-timeout=60s
 provider:
   name: webhook
   webhook:
@@ -15,7 +28,16 @@ provider:
     # No probe overrides: the chart already probes /healthz on port 8080, which
     # is where this webhook serves them. The provider API is on 8888, loopback
     # only, and the kubelet could not reach it there anyway.
-    # The following values are set to the default values
+    # The chart sets a security context for the ExternalDNS container only.
+    # The webhook writes nothing to disk and needs no privileges.
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      capabilities:
+        drop: ["ALL"]
+    # Every variable the webhook reads. All but the ownership ID, the router
+    # address and the credentials are set to their defaults.
     env:
       - name: SHUTDOWN_TIMEOUT_SECONDS
         value: "5"
@@ -51,5 +73,9 @@ provider:
         value: "false"
       - name: PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME
         value: root
+      # services.yaml creates this Secret for the local k3d cluster.
       - name: PROVIDER_OPENWRT_LUCIRPC_AUTH_PASSWORD
-        value: admin
+        valueFrom:
+          secretKeyRef:
+            name: openwrt-luci
+            key: password
