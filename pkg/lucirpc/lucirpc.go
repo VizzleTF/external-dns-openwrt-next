@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -153,22 +154,22 @@ func (c *lucirpc) getUri(path, method string) string {
 		proto = "http://"
 	}
 
-	url := proto + c.config.Hostname + ":" + strconv.Itoa(c.config.Port) + path
+	uri := proto + c.config.Hostname + ":" + strconv.Itoa(c.config.Port) + path
 	if method != methodLogin {
 		if token := c.getToken(); token != "" {
-			url = url + "?auth=" + token
+			uri = uri + "?auth=" + token
 		}
 	}
 
-	return url
+	return uri
 }
 
-func (c *lucirpc) call(ctx context.Context, url string, postBody []byte) ([]byte, error) {
+func (c *lucirpc) call(ctx context.Context, uri string, postBody []byte) ([]byte, error) {
 	// Neither the URL nor the body may be logged as-is: the URL carries
 	// ?auth=<session token> and a login body carries the router password.
-	c.log.Debug("call", slog.String("url", redactURL(url)))
+	c.log.Debug("call", slog.String("url", redactURL(uri)))
 	body := bytes.NewReader(postBody)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, uri, body)
 	if err != nil {
 		return nil, err
 	}
@@ -176,6 +177,12 @@ func (c *lucirpc) call(ctx context.Context, url string, postBody []byte) ([]byte
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		// A transport error quotes the request URL, token included, and
+		// callers log it.
+		var uerr *url.Error
+		if errors.As(err, &uerr) {
+			uerr.URL = redactURL(uerr.URL)
+		}
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -218,11 +225,11 @@ func (c *lucirpc) rpcWithAuth(ctx context.Context, path, method string, params [
 }
 
 // redactURL strips the query string, which is where the session token lives.
-func redactURL(url string) string {
-	if idx := strings.IndexByte(url, '?'); idx >= 0 {
-		return url[:idx] + "?<redacted>"
+func redactURL(uri string) string {
+	if idx := strings.IndexByte(uri, '?'); idx >= 0 {
+		return uri[:idx] + "?<redacted>"
 	}
-	return url
+	return uri
 }
 
 // parseString renders an RPC result: strings pass through, anything else is

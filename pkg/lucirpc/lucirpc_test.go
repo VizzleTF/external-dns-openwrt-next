@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -130,5 +131,34 @@ func TestUciSurfacesALoginFailureOnReauthentication(t *testing.T) {
 
 	if _, err := client.Uci(context.Background(), "get_all", []string{"dhcp"}); !errors.Is(err, ErrRpcLoginFail) {
 		t.Errorf("got %v, want %v", err, ErrRpcLoginFail)
+	}
+}
+
+func TestSysKeepsTheTokenOutOfTransportErrors(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc(authPath, respond(http.StatusOK, `{"result":"s3cr3t"}`))
+	mux.HandleFunc(sysPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.RequestURI != sysPath+"?auth=s3cr3t" {
+			t.Errorf("request URI: got %q", r.RequestURI)
+		}
+		// Drop the connection without a response, as a router going away would.
+		conn, _, err := http.NewResponseController(w).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	})
+	client := newTestClient(t, mux)
+	if err := client.auth(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := client.Sys(context.Background(), "exec", []string{"/etc/init.d/dnsmasq restart"})
+	if err == nil {
+		t.Fatal("got no error from a dropped connection")
+	}
+	if msg := err.Error(); strings.Contains(msg, "s3cr3t") || !strings.Contains(msg, sysPath+"?<redacted>") {
+		t.Errorf("got %q, want the URL with its query redacted", msg)
 	}
 }
