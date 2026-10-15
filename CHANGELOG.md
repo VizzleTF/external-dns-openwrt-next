@@ -22,6 +22,18 @@
   Anywhere else — `upsert-only`, or the chart's default `txt` registry, which
   drops every delete — remove it by hand: `uci delete dhcp.<section>`,
   `uci commit dhcp` and `/etc/init.d/dnsmasq restart`.
+- **The router session token could reach the logs.** When a call to the router
+  failed below HTTP — a timeout, a refused or dropped connection — the error
+  quoted the request URL, `?auth=<token>` included, and the webhook logs that
+  error at ERROR level. The token is a root login on the router: `rpc/sys` runs
+  any command with it. Transport errors now carry the URL with its query
+  redacted, as the debug log already did. rpcd extends a session on every use.
+  After the upgrade the webhook logs in afresh and stops touching the old
+  token, so that token lapses after LuCI's `sessiontime`, an hour by default —
+  unless whoever read it from a log keeps using it, and then it never does:
+  run `/etc/init.d/rpcd restart` on the router after upgrading. That ends
+  every session, LuCI web logins included; the webhook gets a 403 and logs in
+  again on its next call. Checked on OpenWrt 24.10 and 25.12.
 
 ## v0.8.0
 
