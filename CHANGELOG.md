@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.11.0
+
+- **A chart of its own.** `oci://ghcr.io/vizzletf/charts/external-dns-openwrt`
+  runs ExternalDNS v0.22.0 and the webhook in one pod. Four values cover an
+  install: `ownershipID`, `router.hostname`, `router.existingSecret` (or
+  `router.password`) and `externalDNS.domainFilters`. The chart creates the
+  ClusterRole for the chosen sources only and, for the record status mirror,
+  a Role on `openwrtrecords` in the release namespace, so neither depends on
+  the release name or namespace any more. It ships the `OpenWrtRecord` CRD.
+  What the provider needs — `--registry=noop`, A and CNAME only, the provider
+  API on loopback, a 60 s write timeout, one replica with `Recreate` — is
+  built in, and it refuses to render without a domain filter, or with
+  ownership off under `policy: sync`. The webhook itself is unchanged.
+- **The upstream chart is no longer documented.** `example/values.yaml` and
+  `example/record-status.yaml` are gone; README has a table mapping their
+  settings onto the chart's values. A webhook sidecar in the upstream chart
+  keeps working as before. To move, uninstall the old release, keep the same
+  `ownershipID`, and install the chart; a CRD applied by hand is skipped and
+  can stay, a hand-made Role and RoleBinding can be deleted.
+- **CI installs the chart.** `hack/chart-lint.sh` renders it with each values
+  file in `ci/` and checks the refusals, and `hack/chart-e2e.sh` installs it
+  into k3s against an OpenWrt router, both in docker. Releases publish the
+  chart next to the image, versioned like the tag.
+
 ## v0.10.0
 
 ### Added

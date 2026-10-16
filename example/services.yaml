@@ -1,6 +1,6 @@
 ---
-# The router password the example values read. Create it out of band anywhere
-# but a throwaway cluster, so that it never lands in a manifest.
+# The router password skaffold.yaml points the chart at. Create it out of
+# band anywhere but a throwaway cluster, so that it never lands in a manifest.
 apiVersion: v1
 kind: Secret
 metadata:
@@ -24,7 +24,7 @@ spec:
     - port: 8888
       targetPort: 8888
   selector:
-    app.kubernetes.io/name: external-dns
+    app.kubernetes.io/name: external-dns-openwrt
   externalIPs:
   - 192.168.150.1
 ---
@@ -40,6 +40,6 @@ spec:
     - port: 8888
       targetPort: 8888
   selector:
-    app.kubernetes.io/name: external-dns
+    app.kubernetes.io/name: external-dns-openwrt
   externalIPs:
   - 192.168.150.2

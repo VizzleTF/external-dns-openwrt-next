@@ -14,10 +14,9 @@ config, so point it at a router you can test on.
 
 ### Point it at the router
 
-- `example/values.yaml`: set `PROVIDER_OPENWRT_LUCIRPC_HOSTNAME` to the
-  router. uhttpd's own certificate fails the default TLS check, so either set
-  `PROVIDER_OPENWRT_LUCIRPC_SSL` to `"false"` and the port to `"80"`, or set
-  `PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY` to `"true"`.
+- `skaffold.yaml`: set `router.hostname` to the router. uhttpd's own
+  certificate fails the default TLS check, so either add `router.tls: "false"`
+  and `router.port: "80"`, or `router.insecureSkipVerify: "true"`.
 - `example/services.yaml`: set the password in the `openwrt-luci` Secret.
 
 ### Run
@@ -28,19 +27,21 @@ skaffold dev
 ```
 
 skaffold builds the webhook with ko, imports the image into the k3d cluster
-(no registry needed), installs the ExternalDNS chart with
-`example/values.yaml`, and rebuilds on every change.
+(no registry needed), installs the chart from `charts/external-dns-openwrt`
+with it, and rebuilds on every change.
 
 ### Check
 
 ```
-kubectl logs deploy/external-dns -c webhook
+kubectl logs deploy/external-dns-openwrt -c webhook
 kubectl get owr
 nslookup cname.foobar.io <router>
 ```
 
-`kubectl get owr` lists the record status the webhook mirrors from
-`example/record-status.yaml`, which skaffold applies too.
+`kubectl get owr` lists the record status the webhook mirrors.
+
+Without a router or k3d, `./hack/chart-e2e.sh` installs the chart into k3s
+against an OpenWrt router, both in docker, the way CI does.
 
 `Ctrl+C` in `skaffold dev` removes what it deployed. The records it wrote stay
 on the router until you delete them from `/etc/config/dhcp`. Then:
