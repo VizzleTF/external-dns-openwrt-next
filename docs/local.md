@@ -9,7 +9,6 @@ config, so point it at a router you can test on.
 - docker
 - k3d
 - skaffold
-- ko
 - kubectl
 - an OpenWrt router with LuCI, reachable from the cluster
 

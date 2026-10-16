@@ -26,11 +26,9 @@ For examples of creating DNS records via CRDs or via Ingress/Service annotations
   one alias.
 - A changed CNAME restarts dnsmasq, about a second without DNS and DHCP for
   the LAN. A changed A record only has the hostfile re-read.
-- Per-record TTLs are not supported. UCI `domain`/`cname` sections carry no TTL —
-  dnsmasq answers them with its global `local_ttl` — so `Records()` reports a
-  fixed 300 and a requested TTL is stripped rather than planned on every run.
+- Per-record TTLs are not supported, see [Supported records](#supported-records).
 - Set identifiers and provider-specific properties are ignored, and stripped
-  for the same reason: a section has no place for them. Endpoints for one name
+  like TTLs: a section has no place for them. Endpoints for one name
   and type that differ only in set identifier become one record, and
   ExternalDNS keeps one of them.
 
@@ -69,7 +67,11 @@ packages: the webhook calls ubus over the `/ubus` endpoint uhttpd serves for
 LuCI, and rpcd behind it, both of which come with LuCI.
 
 `root` works with the stock ACLs. A login that can write `dhcp` and nothing
-else is safer, since the password sits in a Kubernetes Secret. On the router:
+else is safer, since the password sits in a Kubernetes Secret. It is still
+in charge of dnsmasq and odhcpd, whose settings live in `dhcp` too: upstream
+servers, DHCP, and `leasetrigger`, a script odhcpd runs as root. rpcd cannot
+narrow a login to some sections of a config, so guard the password
+accordingly. On the router:
 
 ```sh
 cat > /usr/share/rpcd/acl.d/external-dns.json <<'EOF'
@@ -337,7 +339,8 @@ where nothing can sit between the pod and the router: the webhook sends the
 password at every login, and whoever answers in the router's place gets it,
 with everything that login may do. For `root` that is the whole router, which
 is why a [dedicated login](#router-requirements) that can write `dhcp` and
-nothing else matters most here.
+nothing else matters most here. Even that one can point the LAN at another
+upstream DNS server or have odhcpd run a command as root.
 
 ## Dependencies
 
@@ -382,8 +385,9 @@ and never deleted. An `A` endpoint whose target is not an IPv4 address is
 dropped, since dnsmasq would serve it as `AAAA` or not at all.
 
 Per-record TTLs are not supported either — `domain`/`cname` sections have no TTL
-field and dnsmasq answers them from its global `local_ttl` — so a TTL on the
-desired endpoint is stripped for the same reason.
+field and dnsmasq answers them from its global `local_ttl` — so `Records()`
+reports a fixed 300 and a TTL on the desired endpoint is stripped rather than
+planned on every run.
 
 An endpoint whose name or any target holds whitespace, a control character, a
 non-ASCII byte, `,`, `"` or `#`, or a label over 63 characters, is dropped too,
