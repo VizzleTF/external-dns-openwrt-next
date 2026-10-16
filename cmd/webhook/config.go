@@ -15,7 +15,9 @@ type Config struct {
 
 func defaultConfig() *Config {
 	return &Config{
-		ShutdownTimeout: 5,
+		// Inside the kubelet's default 30 s grace period, with room to exit.
+		// A change set still running gets that long to reach the router.
+		ShutdownTimeout: 25,
 		Log:             logger.DefaultConfig(),
 		Router:          router.DefaultConfig(),
 		Provider:        provider.DefaultConfig(),

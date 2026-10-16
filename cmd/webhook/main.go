@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -91,7 +92,15 @@ func run() error {
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
-		return fmt.Errorf("shutdown server: %w", err)
+		// A change set outlived the budget. Nothing is half-applied: its staged
+		// changes die with the session, and the next ExternalDNS run plans
+		// them again. Not a failure worth a non-zero exit on every rollout.
+		if !errors.Is(err, context.DeadlineExceeded) {
+			return fmt.Errorf("shutdown server: %w", err)
+		}
+		log.Warn("shutdown timed out, a change set still running was abandoned",
+			slog.Int("timeout_seconds", cfg.ShutdownTimeout))
+		return nil
 	}
 
 	log.Info("service shutdown completed")

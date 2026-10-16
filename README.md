@@ -378,7 +378,7 @@ for it rather than writing the same records a second time.
 | `ROUTER_HEALTHCHECK_PORT` | `8080` | Port `/healthz` and `/metrics` listen on, on every interface |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_ENCODING` | `json` | `json` or `console` |
-| `SHUTDOWN_TIMEOUT_SECONDS` | `5` | Graceful shutdown budget |
+| `SHUTDOWN_TIMEOUT_SECONDS` | `25` | Graceful shutdown budget: how long a change set still running gets to finish. Keep it under the pod's `terminationGracePeriodSeconds` (30 by default) |
 | `PROVIDER_STATUS_ENABLED` | `false` | Mirror each record's status into `OpenWrtRecord` objects, see [Record status](#record-status) |
 | `PROVIDER_STATUS_NAMESPACE` | pod's own | Namespace those objects are written to |
 
