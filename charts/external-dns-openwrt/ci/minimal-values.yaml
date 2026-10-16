@@ -1,0 +1,6 @@
+ownershipID: homelab
+router:
+  hostname: 192.168.1.1
+  password: secret
+externalDNS:
+  domainFilters: [lan]

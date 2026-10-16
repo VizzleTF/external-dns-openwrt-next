@@ -1,0 +1,67 @@
+{{- if .Values.rbac.create }}
+{{- $sources := .Values.externalDNS.sources }}
+{{- $gateway := false }}
+{{- range $sources }}{{ if hasPrefix "gateway-" . }}{{ $gateway = true }}{{ end }}{{ end }}
+# Read access to the sources ExternalDNS is started with, and nothing else.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "external-dns-openwrt.fullname" . }}
+  labels:
+    {{- include "external-dns-openwrt.labels" . | nindent 4 }}
+rules:
+  {{- if has "service" $sources }}
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods", "services"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "watch", "list"]
+  {{- end }}
+  {{- if has "ingress" $sources }}
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses"]
+    verbs: ["get", "watch", "list"]
+  {{- end }}
+  {{- if has "crd" $sources }}
+  - apiGroups: ["externaldns.k8s.io"]
+    resources: ["dnsendpoints"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: ["externaldns.k8s.io"]
+    resources: ["dnsendpoints/status"]
+    verbs: ["update"]
+  {{- end }}
+  {{- if $gateway }}
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: ["gateways"]
+    verbs: ["get", "watch", "list"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "watch", "list"]
+  {{- end }}
+  {{- range $sources }}
+  {{- if hasPrefix "gateway-" . }}
+  - apiGroups: ["gateway.networking.k8s.io"]
+    resources: [{{ printf "%ss" (trimPrefix "gateway-" .) | quote }}]
+    verbs: ["get", "watch", "list"]
+  {{- end }}
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "external-dns-openwrt.fullname" . }}
+  labels:
+    {{- include "external-dns-openwrt.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "external-dns-openwrt.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "external-dns-openwrt.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

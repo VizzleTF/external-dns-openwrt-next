@@ -1,0 +1,22 @@
+{{- if .Values.service.enabled }}
+# Metrics only. The provider API listens on loopback and is not reachable
+# through it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "external-dns-openwrt.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "external-dns-openwrt.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "external-dns-openwrt.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 7979
+      targetPort: http
+    - name: http-webhook
+      port: 8080
+      targetPort: http-webhook
+{{- end }}

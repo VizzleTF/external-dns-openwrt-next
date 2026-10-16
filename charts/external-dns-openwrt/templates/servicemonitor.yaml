@@ -1,0 +1,27 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "external-dns-openwrt.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "external-dns-openwrt.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "external-dns-openwrt.selectorLabels" . | nindent 6 }}
+  endpoints:
+    {{- range list "http" "http-webhook" }}
+    - port: {{ . }}
+      path: /metrics
+      {{- with $.Values.serviceMonitor.interval }}
+      interval: {{ . }}
+      {{- end }}
+      {{- with $.Values.serviceMonitor.scrapeTimeout }}
+      scrapeTimeout: {{ . }}
+      {{- end }}
+    {{- end }}
+{{- end }}

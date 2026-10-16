@@ -1,0 +1,14 @@
+ExternalDNS publishes A and CNAME records for {{ join ", " .Values.externalDNS.domainFilters }} to {{ .Values.router.hostname }} ({{ .Values.externalDNS.policy }}).
+
+Logs:
+  kubectl -n {{ .Release.Namespace }} logs deploy/{{ include "external-dns-openwrt.fullname" . }} -c webhook
+{{- if .Values.recordStatus.enabled }}
+
+Whether each record made it onto the router:
+  kubectl -n {{ .Release.Namespace }} get owr
+{{- end }}
+{{- if eq .Values.ownershipID "" }}
+
+Ownership is disabled: every domain/cname section on the router counts as this
+install's.
+{{- end }}
