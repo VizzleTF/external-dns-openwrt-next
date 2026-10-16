@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.10.0
+
+### Added
+
+- **Record status in the cluster.** With `PROVIDER_STATUS_ENABLED=true` the
+  webhook keeps an `OpenWrtRecord` object per record, so `kubectl get owr`
+  shows whether each one made it onto the router: `Ready`, `Pending`,
+  `Conflict` (left out so that dnsmasq keeps starting), `Error` (its change
+  set failed), `Rejected` (dropped in `AdjustEndpoints`) or `Orphan` (still on
+  the router, no longer asked for), with the reason. Off by default; it needs
+  the CRD and RBAC in `example/record-status.yaml`, and the example values
+  turn it on. Writes go to the API server from the background with server-side
+  apply, and a refused one costs a warning and
+  `external_dns_openwrt_status_errors_total`, never a change set. No new
+  dependency: the webhook makes the few REST calls itself.
+
 ## v0.9.0
 
 ### Breaking

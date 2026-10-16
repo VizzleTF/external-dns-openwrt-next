@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/openwrt"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/status"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhookapi"
 )
 
@@ -21,9 +22,12 @@ const defaultTTL = 300
 type Provider struct {
 	openwrt openwrt.OpenWRT
 	log     *slog.Logger
+	status  *tracker
 }
 
-func New(cfg *Config, log *slog.Logger) (*Provider, error) {
+// New builds the provider. publish receives a status snapshot after every
+// run; nil turns the record status mirror off.
+func New(cfg *Config, log *slog.Logger, publish func([]status.Record)) (*Provider, error) {
 	opwrt, err := openwrt.New(cfg.OpenWRT, log)
 	if err != nil {
 		return nil, err
@@ -32,6 +36,7 @@ func New(cfg *Config, log *slog.Logger) (*Provider, error) {
 	return &Provider{
 		openwrt: opwrt,
 		log:     log,
+		status:  newTracker(publish),
 	}, nil
 }
 
@@ -53,7 +58,9 @@ func (p *Provider) ApplyChanges(ctx context.Context, changes *webhookapi.Changes
 	// re-adding the same UCI section on every run.
 	remove, add = cancelOut(remove, add)
 
-	return p.openwrt.ApplyDNSRecords(ctx, remove, add)
+	skipped, err := p.openwrt.ApplyDNSRecords(ctx, remove, add)
+	p.status.observeApply(changes, skipped, err)
+	return err
 }
 
 // AdjustEndpoints trims the desired state down to what this provider can
@@ -76,6 +83,12 @@ func (p *Provider) ApplyChanges(ctx context.Context, changes *webhookapi.Changes
 //     never match what Records() reports.
 func (p *Provider) AdjustEndpoints(endpoints []*webhookapi.Endpoint) []*webhookapi.Endpoint {
 	adjusted := make([]*webhookapi.Endpoint, 0, len(endpoints))
+	// Only A and CNAME: every other type is the --managed-record-types
+	// default rather than something anyone asked this provider for.
+	rejected := map[recordKey]rejection{}
+	reject := func(ep *webhookapi.Endpoint, reason string) {
+		rejected[keyOf(ep.DNSName, ep.RecordType)] = rejection{targets: sorted(ep.Targets), reason: reason}
+	}
 
 next:
 	for _, ep := range endpoints {
@@ -94,12 +107,14 @@ next:
 		if strings.HasPrefix(ep.DNSName, "*.") {
 			p.log.Warn("dropping endpoint, dnsmasq does not expand wildcard names",
 				slog.String("name", ep.DNSName), slog.String("type", ep.RecordType))
+			reject(ep, "dnsmasq does not expand wildcard names")
 			continue
 		}
 
 		if ep.RecordType == webhookapi.RecordTypeCNAME && len(ep.Targets) > 1 {
 			p.log.Warn("dropping endpoint, a CNAME has one target and dnsmasq does not start with two",
 				slog.String("name", ep.DNSName), slog.Any("targets", ep.Targets))
+			reject(ep, "a CNAME has one target and dnsmasq does not start with two")
 			continue
 		}
 
@@ -107,6 +122,7 @@ next:
 			if err := (openwrt.DNSRecord{Type: ep.RecordType, Name: ep.DNSName, Value: target}).Validate(); err != nil {
 				p.log.Warn("dropping endpoint, it cannot be written to the router",
 					slog.String("name", ep.DNSName), slog.String("type", ep.RecordType), slog.Any("error", err))
+				reject(ep, err.Error())
 				continue next
 			}
 		}
@@ -125,6 +141,7 @@ next:
 		adjusted = append(adjusted, ep)
 	}
 
+	p.status.observeDesired(adjusted, rejected)
 	return adjusted
 }
 
@@ -134,7 +151,9 @@ func (p *Provider) Records(ctx context.Context) ([]*webhookapi.Endpoint, error) 
 		return nil, err
 	}
 
-	return p.dnsRecords2Endpoints(records), nil
+	endpoints := p.dnsRecords2Endpoints(records)
+	p.status.observeRecords(endpoints)
+	return endpoints, nil
 }
 
 // cancelOut drops the records whose key appears as often in both slices,

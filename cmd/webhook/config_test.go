@@ -28,6 +28,8 @@ func TestEnvironmentVariableNames(t *testing.T) {
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY", "true")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME", "root")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_AUTH_PASSWORD", "secret")
+	t.Setenv("PROVIDER_STATUS_ENABLED", "true")
+	t.Setenv("PROVIDER_STATUS_NAMESPACE", "dns")
 
 	cfg := defaultConfig()
 	if err := config.Read(cfg); err != nil {
@@ -55,6 +57,8 @@ func TestEnvironmentVariableNames(t *testing.T) {
 		{"PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY", rpc.InsecureSkipVerify, true},
 		{"PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME", rpc.Auth.Username, "root"},
 		{"PROVIDER_OPENWRT_LUCIRPC_AUTH_PASSWORD", rpc.Auth.Password, "secret"},
+		{"PROVIDER_STATUS_ENABLED", cfg.Provider.Status.Enabled, true},
+		{"PROVIDER_STATUS_NAMESPACE", cfg.Provider.Status.Namespace, "dns"},
 	}
 
 	for _, check := range checks {

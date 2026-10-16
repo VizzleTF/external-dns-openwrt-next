@@ -37,7 +37,8 @@ provider:
       capabilities:
         drop: ["ALL"]
     # Every variable the webhook reads. All but the ownership ID, the router
-    # address and the credentials are set to their defaults.
+    # address, the credentials and the status mirror are set to their
+    # defaults.
     env:
       - name: SHUTDOWN_TIMEOUT_SECONDS
         value: "5"
@@ -76,3 +77,11 @@ provider:
           secretKeyRef:
             name: openwrt-luci
             key: password
+      # Mirrors each record's status into OpenWrtRecord objects, for
+      # `kubectl get owr`. Needs record-status.yaml applied first. Off by
+      # default.
+      - name: PROVIDER_STATUS_ENABLED
+        value: "true"
+      # Empty: the namespace the webhook runs in.
+      - name: PROVIDER_STATUS_NAMESPACE
+        value: ""

@@ -28,3 +28,4 @@ deploy:
 manifests:
   rawYaml:
     - example/services.yaml
+    - example/record-status.yaml

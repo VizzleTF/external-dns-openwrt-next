@@ -103,14 +103,14 @@ func TestE2EApplyingRecords(t *testing.T) {
 			host, alias, other := prefix+"host.lan", prefix+"alias.lan", prefix+"other.lan"
 			t.Cleanup(func() {
 				if leftover := committed(t, prefix); len(leftover) > 0 {
-					_ = e2eRoot(t).ApplyDNSRecords(ctx, leftover, nil)
+					_, _ = e2eRoot(t).ApplyDNSRecords(ctx, leftover, nil)
 				}
 			})
 
 			// Create an A record and a CNAME onto it.
 			a1 := DNSRecord{Type: RecordTypeA, Name: host, Value: "10.9.8.1"}
 			cname := DNSRecord{Type: RecordTypeCNAME, Name: alias, Value: host}
-			if err := o.ApplyDNSRecords(ctx, nil, []DNSRecord{a1, cname}); err != nil {
+			if _, err := o.ApplyDNSRecords(ctx, nil, []DNSRecord{a1, cname}); err != nil {
 				t.Fatal(err)
 			}
 			mark := func(records ...DNSRecord) []DNSRecord {
@@ -129,7 +129,7 @@ func TestE2EApplyingRecords(t *testing.T) {
 			a2 := DNSRecord{Type: RecordTypeA, Name: other, Value: "10.9.8.2"}
 			a3 := DNSRecord{Type: RecordTypeA, Name: host, Value: "10.9.8.3"}
 			cname2 := DNSRecord{Type: RecordTypeCNAME, Name: alias, Value: other}
-			if err := o.ApplyDNSRecords(ctx, []DNSRecord{a1, cname}, []DNSRecord{a2, a3, cname2}); err != nil {
+			if _, err := o.ApplyDNSRecords(ctx, []DNSRecord{a1, cname}, []DNSRecord{a2, a3, cname2}); err != nil {
 				t.Fatal(err)
 			}
 			if got, want := committed(t, prefix), mark(a2, a3, cname2); !slices.Equal(got, want) {
@@ -142,14 +142,14 @@ func TestE2EApplyingRecords(t *testing.T) {
 			// one does not apply what the failed one staged.
 			staged := DNSRecord{Type: RecordTypeA, Name: prefix + "staged.lan", Value: "10.9.8.4"}
 			refused := DNSRecord{Type: RecordTypeA, Name: prefix + "refused.lan", Value: "fd00::4"}
-			if err := o.ApplyDNSRecords(ctx, []DNSRecord{a3}, []DNSRecord{staged, refused}); err == nil {
+			if _, err := o.ApplyDNSRecords(ctx, []DNSRecord{a3}, []DNSRecord{staged, refused}); err == nil {
 				t.Fatal("a change set with an AAAA address went through")
 			}
 			if got, want := committed(t, prefix), mark(a2, a3, cname2); !slices.Equal(got, want) {
 				t.Errorf("after a failure: got %v, want %v", got, want)
 			}
 			next := DNSRecord{Type: RecordTypeA, Name: prefix + "next.lan", Value: "10.9.8.5"}
-			if err := o.ApplyDNSRecords(ctx, nil, []DNSRecord{next}); err != nil {
+			if _, err := o.ApplyDNSRecords(ctx, nil, []DNSRecord{next}); err != nil {
 				t.Fatal(err)
 			}
 			if got, want := committed(t, prefix), mark(next, a2, a3, cname2); !slices.Equal(got, want) {
@@ -160,7 +160,7 @@ func TestE2EApplyingRecords(t *testing.T) {
 			resolves(t, staged.Name)
 
 			// Delete everything.
-			if err := o.ApplyDNSRecords(ctx, []DNSRecord{next, a2, a3, cname2}, nil); err != nil {
+			if _, err := o.ApplyDNSRecords(ctx, []DNSRecord{next, a2, a3, cname2}, nil); err != nil {
 				t.Fatal(err)
 			}
 			if got := committed(t, prefix); len(got) != 0 {
@@ -193,7 +193,7 @@ func TestE2EConcurrentAddsKeepBothSections(t *testing.T) {
 	const prefix = "e2e-concurrent-"
 	t.Cleanup(func() {
 		if leftover := committed(t, prefix); len(leftover) > 0 {
-			_ = e2eRoot(t).ApplyDNSRecords(ctx, leftover, nil)
+			_, _ = e2eRoot(t).ApplyDNSRecords(ctx, leftover, nil)
 		}
 	})
 
@@ -202,11 +202,11 @@ func TestE2EConcurrentAddsKeepBothSections(t *testing.T) {
 
 	o := e2eProvider(t, os.Getenv("OPENWRT_E2E_USERNAME"), os.Getenv("OPENWRT_E2E_PASSWORD")).(*openWRT)
 	o.ubus = &interleaved{Client: o.ubus, before: func() {
-		if err := e2eRoot(t).ApplyDNSRecords(ctx, nil, []DNSRecord{theirs}); err != nil {
+		if _, err := e2eRoot(t).ApplyDNSRecords(ctx, nil, []DNSRecord{theirs}); err != nil {
 			t.Error(err)
 		}
 	}}
-	if err := o.ApplyDNSRecords(ctx, nil, []DNSRecord{mine}); err != nil {
+	if _, err := o.ApplyDNSRecords(ctx, nil, []DNSRecord{mine}); err != nil {
 		t.Fatal(err)
 	}
 

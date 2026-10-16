@@ -326,7 +326,7 @@ func TestAdding(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rpc := &fakeRPC{sections: tc.sections}
-			if err := tc.provider(rpc).ApplyDNSRecords(ctx, nil, []DNSRecord{tc.add}); err != nil {
+			if _, err := tc.provider(rpc).ApplyDNSRecords(ctx, nil, []DNSRecord{tc.add}); err != nil {
 				t.Fatal(err)
 			}
 			assertCalls(t, rpc, tc.want...)
@@ -335,7 +335,7 @@ func TestAdding(t *testing.T) {
 
 	t.Run("names each section it adds", func(t *testing.T) {
 		rpc := &fakeRPC{}
-		if err := owning(rpc).ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("a.bar.com", "1.1.1.1"), aRecord("b.bar.com", "1.1.1.1")}); err != nil {
+		if _, err := owning(rpc).ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("a.bar.com", "1.1.1.1"), aRecord("b.bar.com", "1.1.1.1")}); err != nil {
 			t.Fatal(err)
 		}
 		name := regexp.MustCompile(`^external_dns_[A-Z2-7]{26}$`)
@@ -346,7 +346,7 @@ func TestAdding(t *testing.T) {
 
 	t.Run("rejects incomplete records", func(t *testing.T) {
 		rpc := &fakeRPC{}
-		err := owning(rpc).ApplyDNSRecords(ctx, nil, []DNSRecord{{Type: RecordTypeA, Name: "foo.bar.com"}})
+		_, err := owning(rpc).ApplyDNSRecords(ctx, nil, []DNSRecord{{Type: RecordTypeA, Name: "foo.bar.com"}})
 		if err == nil || !strings.Contains(err.Error(), "value is required") {
 			t.Errorf("got %v", err)
 		}
@@ -457,11 +457,16 @@ func TestNeverWritingACNAMEThatStopsDnsmasq(t *testing.T) {
 			o := tc.provider(rpc)
 			logged := warnings(o)
 
-			if err := o.ApplyDNSRecords(context.Background(), tc.remove, tc.add); err != nil {
+			skipped, err := o.ApplyDNSRecords(context.Background(), tc.remove, tc.add)
+			if err != nil {
 				t.Fatal(err)
 			}
 			assertCalls(t, rpc, tc.want...)
 			assertWarned(t, logged, tc.warning)
+			// Every warned skip is reported to the caller, and nothing else.
+			if (tc.warning != "") != (len(skipped) == 1) || len(skipped) > 1 {
+				t.Errorf("skipped = %+v, want one skip only when warned", skipped)
+			}
 		})
 	}
 }
@@ -489,7 +494,7 @@ func TestAddingNextToAnAddressItDoesNotOwn(t *testing.T) {
 			o := tc.provider(rpc)
 			logged := warnings(o)
 
-			if err := o.ApplyDNSRecords(context.Background(), nil, []DNSRecord{aRecord("nas.lan", "10.0.0.6")}); err != nil {
+			if _, err := o.ApplyDNSRecords(context.Background(), nil, []DNSRecord{aRecord("nas.lan", "10.0.0.6")}); err != nil {
 				t.Fatal(err)
 			}
 			add := "uci add dhcp domain ip=10.0.0.6 name=nas.lan"
@@ -629,7 +634,7 @@ func TestDeleting(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rpc := &fakeRPC{sections: tc.sections}
-			if err := owning(rpc).ApplyDNSRecords(ctx, tc.remove, nil); err != nil {
+			if _, err := owning(rpc).ApplyDNSRecords(ctx, tc.remove, nil); err != nil {
 				t.Fatal(err)
 			}
 			assertCalls(t, rpc, tc.want...)
@@ -641,7 +646,7 @@ func TestDeleting(t *testing.T) {
 			sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)},
 			fail:     map[string]error{"uci delete dhcp mine": errors.New("boom")},
 		}
-		err := owning(rpc).ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)
+		_, err := owning(rpc).ApplyDNSRecords(ctx, []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)
 		if err == nil || !strings.Contains(err.Error(), "boom") {
 			t.Errorf("got %v", err)
 		}
@@ -664,7 +669,7 @@ func TestLeavingAnIPv6DomainSectionAlone(t *testing.T) {
 
 	// The update the plan used to ask for: out with the old value, in with the
 	// cluster's.
-	if err := o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("nas.lan", "fd00::5")}, []DNSRecord{aRecord("nas.lan", "10.0.0.5")}); err != nil {
+	if _, err := o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("nas.lan", "fd00::5")}, []DNSRecord{aRecord("nas.lan", "10.0.0.5")}); err != nil {
 		t.Fatal(err)
 	}
 	assertCalls(t, rpc, getAll, getAll, "uci add dhcp domain ip=10.0.0.5 name=nas.lan", apply)
@@ -673,7 +678,7 @@ func TestLeavingAnIPv6DomainSectionAlone(t *testing.T) {
 func TestUpdatingRemovesAndAddsInASingleApply(t *testing.T) {
 	rpc := &fakeRPC{sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)}}
 
-	err := owning(rpc).ApplyDNSRecords(context.Background(),
+	_, err := owning(rpc).ApplyDNSRecords(context.Background(),
 		[]DNSRecord{aRecord("foo.bar.com", "1.1.1.1")},
 		[]DNSRecord{aRecord("foo.bar.com", "9.9.9.9")})
 	if err != nil {
@@ -691,7 +696,7 @@ func TestUpdatingAwayADuplicateSection(t *testing.T) {
 	}}
 	record := aRecord("dup.bar.com", "1.1.1.1")
 
-	if err := owning(rpc).ApplyDNSRecords(context.Background(), []DNSRecord{record, record}, []DNSRecord{record}); err != nil {
+	if _, err := owning(rpc).ApplyDNSRecords(context.Background(), []DNSRecord{record, record}, []DNSRecord{record}); err != nil {
 		t.Fatal(err)
 	}
 	// The sections of one record are deleted in map order.
@@ -744,7 +749,7 @@ func TestAFailureDropsTheSession(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if err := owning(tc.rpc).ApplyDNSRecords(context.Background(), remove, tc.add); err == nil {
+			if _, err := owning(tc.rpc).ApplyDNSRecords(context.Background(), remove, tc.add); err == nil {
 				t.Fatal("got no error")
 			}
 			assertCalls(t, tc.rpc, tc.want...)
@@ -761,7 +766,7 @@ func TestApplying(t *testing.T) {
 
 	t.Run("keeps the session after a success", func(t *testing.T) {
 		rpc := &fakeRPC{sections: mine}
-		if err := owning(rpc).ApplyDNSRecords(context.Background(), remove, nil); err != nil {
+		if _, err := owning(rpc).ApplyDNSRecords(context.Background(), remove, nil); err != nil {
 			t.Fatal(err)
 		}
 		assertCalls(t, rpc, getAll, "uci delete dhcp mine", apply)
@@ -773,7 +778,7 @@ func TestApplying(t *testing.T) {
 	// What uci apply answers when the session staged nothing.
 	t.Run("takes nothing to apply for success", func(t *testing.T) {
 		rpc := &fakeRPC{sections: mine, fail: map[string]error{apply: fmt.Errorf("ubus call uci apply: %w", ubus.ErrNoData)}}
-		if err := owning(rpc).ApplyDNSRecords(context.Background(), remove, nil); err != nil {
+		if _, err := owning(rpc).ApplyDNSRecords(context.Background(), remove, nil); err != nil {
 			t.Fatal(err)
 		}
 		if rpc.resets != 0 {
@@ -784,7 +789,7 @@ func TestApplying(t *testing.T) {
 
 func TestNothingToDoDoesNotEvenReadTheRouter(t *testing.T) {
 	rpc := &fakeRPC{}
-	if err := owning(rpc).ApplyDNSRecords(context.Background(), nil, nil); err != nil {
+	if _, err := owning(rpc).ApplyDNSRecords(context.Background(), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	assertCalls(t, rpc)

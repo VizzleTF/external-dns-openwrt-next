@@ -15,15 +15,18 @@ import (
 type fakeOpenWRT struct {
 	records     map[string]openwrt.DNSRecord
 	remove, add []openwrt.DNSRecord
+	// skipped and err are what ApplyDNSRecords returns.
+	skipped []openwrt.Skip
+	err     error
 }
 
 func (f *fakeOpenWRT) GetDNSRecords(context.Context) (map[string]openwrt.DNSRecord, error) {
 	return f.records, nil
 }
 
-func (f *fakeOpenWRT) ApplyDNSRecords(_ context.Context, remove, add []openwrt.DNSRecord) error {
+func (f *fakeOpenWRT) ApplyDNSRecords(_ context.Context, remove, add []openwrt.DNSRecord) ([]openwrt.Skip, error) {
 	f.remove, f.add = remove, add
-	return nil
+	return f.skipped, f.err
 }
 
 func newTestProvider(router *fakeOpenWRT) *Provider {

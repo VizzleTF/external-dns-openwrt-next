@@ -14,6 +14,7 @@ import (
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/logger"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/metrics"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/router"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/status"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhook"
 )
 
@@ -36,13 +37,36 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("setup logger: %w", err)
 	}
-	dnsProvider, err := provider.New(cfg.Provider, log)
+	registry := metrics.NewRegistry()
+	metrics.Build(registry)
+
+	var publish func([]status.Record)
+	if cfg.Provider.Status.Enabled {
+		client, err := status.InCluster(cfg.Provider.Status.Namespace)
+		if err != nil {
+			return fmt.Errorf("setup record status: %w", err)
+		}
+		syncer := status.NewSyncer(client, log, registry)
+		publish = syncer.Publish
+
+		// Deferred, so it stops after the server and no request publishes
+		// into it once it is gone. A write still in flight is dropped.
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			syncer.Run(ctx)
+		}()
+		defer func() {
+			cancel()
+			<-done
+		}()
+	}
+
+	dnsProvider, err := provider.New(cfg.Provider, log, publish)
 	if err != nil {
 		return fmt.Errorf("setup provider: %w", err)
 	}
-
-	registry := metrics.NewRegistry()
-	metrics.Build(registry)
 
 	srv := router.New(cfg.Router, log, registry, webhook.New(dnsProvider, log, registry).Register)
 

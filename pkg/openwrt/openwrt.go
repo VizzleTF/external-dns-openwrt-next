@@ -19,8 +19,15 @@ type OpenWRT interface {
 	// left out.
 	GetDNSRecords(context.Context) (map[string]DNSRecord, error)
 	// ApplyDNSRecords removes and adds records in a single pass, then applies
-	// them at once. Both slices may be empty.
-	ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) error
+	// them at once. Both slices may be empty. It returns the records it left
+	// out to keep dnsmasq starting, which are not an error.
+	ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) ([]Skip, error)
+}
+
+// Skip is a record ApplyDNSRecords did not write, and why.
+type Skip struct {
+	Record DNSRecord
+	Reason string
 }
 
 type openWRT struct {
@@ -150,9 +157,9 @@ func stringOption(options map[string]any, key string) string {
 // change set on failure, so removing an already absent record — or adding one
 // that is already there — must not be an error; otherwise a single stale entry
 // blocks every other change forever.
-func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) (err error) {
+func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) (skipped []Skip, err error) {
 	if len(remove) == 0 && len(add) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// rpcd keeps what a session staged until it is applied, and no other
@@ -168,7 +175,7 @@ func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) 
 	// apply ownership per operation.
 	all, err := o.readSections(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	index := newSectionIndex(all)
@@ -177,22 +184,25 @@ func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) 
 	for _, record := range remove {
 		n, err := o.removeRecord(ctx, index, record)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		changed += n
 	}
 
 	for _, record := range add {
-		n, err := o.addRecord(ctx, index, record)
+		n, skip, err := o.addRecord(ctx, index, record)
 		if err != nil {
-			return err
+			return nil, err
+		}
+		if skip != "" {
+			skipped = append(skipped, Skip{Record: record, Reason: skip})
 		}
 		changed += n
 	}
 
 	if changed == 0 {
 		o.log.Debug("nothing changed, skipping apply")
-		return nil
+		return skipped, nil
 	}
 
 	// Commits what the session staged, and procd reloads dnsmasq for it: a
@@ -201,9 +211,12 @@ func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) 
 	err = o.ubus.Call(ctx, "uci", "apply", map[string]bool{"rollback": false}, nil)
 	if errors.Is(err, ubus.ErrNoData) {
 		o.log.Debug("nothing staged, nothing to apply")
-		return nil
+		return skipped, nil
 	}
-	return err
+	if err != nil {
+		return nil, err
+	}
+	return skipped, nil
 }
 
 // removeRecord deletes every owned section matching the record. Sections that
@@ -227,17 +240,18 @@ func (o *openWRT) removeRecord(ctx context.Context, index sectionIndex, record D
 }
 
 // addRecord creates the record, adopts a matching unowned section, or does
-// nothing when it is already owned and present.
-func (o *openWRT) addRecord(ctx context.Context, index sectionIndex, record DNSRecord) (int, error) {
+// nothing when it is already owned and present. A record it refuses to write
+// comes back as the reason, not as an error.
+func (o *openWRT) addRecord(ctx context.Context, index sectionIndex, record DNSRecord) (int, string, error) {
 	if err := record.Validate(); err != nil {
-		return 0, err
+		return 0, "", err
 	}
 
 	key := record.Key()
 
 	if len(index.owned(key, o.ownershipID)) > 0 {
 		o.log.Info("record already present, nothing to add", recordFields(record)...)
-		return 0, nil
+		return 0, "", nil
 	}
 
 	// Migration path: the record is already on the router but unmarked, so
@@ -245,12 +259,12 @@ func (o *openWRT) addRecord(ctx context.Context, index sectionIndex, record DNSR
 	if o.ownershipEnabled() {
 		if section, ok := index.firstUnowned(key); ok {
 			if err := o.setOwner(ctx, section); err != nil {
-				return 0, fmt.Errorf("adopt %s (%s): %w", record.Name, section, err)
+				return 0, "", fmt.Errorf("adopt %s (%s): %w", record.Name, section, err)
 			}
 			index.markOwned(key, section, o.ownershipID)
 			o.log.Info("adopted existing record",
 				append(recordFields(record), slog.String("section", section))...)
-			return 1, nil
+			return 1, "", nil
 		}
 	}
 
@@ -262,12 +276,13 @@ func (o *openWRT) addRecord(ctx context.Context, index sectionIndex, record DNSR
 		if taken := index.named(RecordTypeCNAME, record.Name); len(taken) > 0 {
 			o.log.Warn("skipping CNAME, its alias already has one and dnsmasq does not start with two",
 				append(recordFields(record), sectionFields(taken[0])...)...)
-			return 0, nil
+			return 0, fmt.Sprintf("alias already has a CNAME to %s in section %s (owner %q)",
+				taken[0].record.Value, taken[0].name, taken[0].record.Owner), nil
 		}
 		if index.closesCNAMELoop(record.Name, record.Value) {
 			o.log.Warn("skipping CNAME, it would close a CNAME loop and dnsmasq does not start with one",
 				recordFields(record)...)
-			return 0, nil
+			return 0, "would close a CNAME loop", nil
 		}
 	}
 
@@ -286,12 +301,12 @@ func (o *openWRT) addRecord(ctx context.Context, index sectionIndex, record DNSR
 
 	section, err := o.createSection(ctx, record)
 	if err != nil {
-		return 0, fmt.Errorf("add %s: %w", record.Name, err)
+		return 0, "", fmt.Errorf("add %s: %w", record.Name, err)
 	}
 
 	index.add(record, section, o.ownershipID)
 	o.log.Info("added record", recordFields(record)...)
-	return 1, nil
+	return 1, "", nil
 }
 
 func (o *openWRT) createSection(ctx context.Context, record DNSRecord) (string, error) {
