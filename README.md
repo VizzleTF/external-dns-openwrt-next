@@ -2,14 +2,15 @@
 
 An [ExternalDNS](https://github.com/kubernetes-sigs/external-dns) webhook provider that manages DNS records on an OpenWrt router, so hostnames from Kubernetes Ingresses, Services and Gateway API routes resolve on the LAN.
 
-For examples of creating DNS records via CRDs or via Ingress/Service annotations, see the [example directory](./example).
+Install it with the [Helm chart](#installation): ExternalDNS and the webhook in one pod, configured with a handful of values.
 
 > **Fork.** Continuation of [renanqts/external-dns-openwrt-webhook](https://github.com/renanqts/external-dns-openwrt-webhook),
 > whose last code change was in February 2025. It adds working create/update/delete,
 > record ownership, multi-target endpoints and all-or-nothing change sets.
 > See [CHANGELOG.md](./CHANGELOG.md).
 >
-> Images: `ghcr.io/vizzletf/external-dns-openwrt-next` (linux/amd64, linux/arm64).
+> Image: `ghcr.io/vizzletf/external-dns-openwrt-next` (linux/amd64, linux/arm64).
+> Chart: `oci://ghcr.io/vizzletf/charts/external-dns-openwrt`.
 
 ## Limitations
 - Supported DNS record types: `A`, `CNAME`. Anything else ExternalDNS asks for —
@@ -31,6 +32,85 @@ For examples of creating DNS records via CRDs or via Ingress/Service annotations
   like TTLs: a section has no place for them. Endpoints for one name
   and type that differ only in set identifier become one record, and
   ExternalDNS keeps one of them.
+
+## Installation
+
+Set up the [router login](#router-requirements) first, then put its password
+in a Secret and install the chart:
+
+```sh
+kubectl create namespace external-dns-openwrt
+kubectl -n external-dns-openwrt create secret generic openwrt-router --from-literal=password='PASSWORD'
+helm install external-dns-openwrt oci://ghcr.io/vizzletf/charts/external-dns-openwrt \
+  -n external-dns-openwrt -f values.yaml
+kubectl -n external-dns-openwrt get owr
+```
+
+```yaml
+# values.yaml
+ownershipID: my-cluster          # see Ownership below; keep it for the life of the install
+router:
+  hostname: 192.168.1.1
+  existingSecret: openwrt-router
+externalDNS:
+  domainFilters: [lan]
+```
+
+That is the whole configuration for most installs. The chart refuses to render
+without the first four, without a domain filter, and with `ownershipID: ""`
+under `policy: sync`, which would delete every record the cluster does not ask
+for. [values.yaml](charts/external-dns-openwrt/values.yaml) documents the rest:
+
+| Value | Default | Meaning |
+| ----- | ------- | ------- |
+| `externalDNS.sources` | `[service, ingress]` | Also `crd`, `gateway-httproute`, `gateway-grpcroute`, `gateway-tlsroute`, `gateway-tcproute`, `gateway-udproute`. The ClusterRole grants read access to these only. |
+| `externalDNS.policy` | `sync` | Or `upsert-only`, which never deletes. |
+| `router.port`, `router.tls`, `router.insecureSkipVerify` | `443`, `true`, `false` | See [TLS](#tls). |
+| `router.caBundle` | — | A ConfigMap or Secret with the router's certificate or its CA, see [TLS](#tls). |
+| `router.username` | `external-dns` | The rpcd login. |
+| `recordStatus.enabled` | `true` | The [record status](#record-status) mirror, with a Role on `openwrtrecords` in the release namespace. |
+| `serviceMonitor.enabled` | `false` | Scrape both `/metrics` endpoints, see [Metrics](#metrics). |
+
+What the provider needs is not configurable: `--registry=noop` (see below),
+`--managed-record-types` `A` and `CNAME`, the provider API on loopback, a
+60 s webhook write timeout, and one replica with the `Recreate` strategy, since
+ExternalDNS has no leader election and two pods would apply every change set
+twice. Both containers run under the restricted Pod Security Standard.
+
+**CRDs.** The chart ships the `OpenWrtRecord` CRD, and the `DNSEndpoint` CRD
+of ExternalDNS v0.22.0 for the `crd` source, in `crds/`. Helm installs them
+once and never upgrades or deletes them, and skips one that already exists. A
+release that changes them says so in the changelog; apply them then with
+`helm show crds oci://ghcr.io/vizzletf/charts/external-dns-openwrt --version X.Y.Z | kubectl apply --server-side -f -`.
+
+**Uninstalling** removes the pod and its RBAC. The CRDs, the `OpenWrtRecord`
+objects and the records on the router stay: delete the objects with
+`kubectl -n <namespace> delete owr --all`, and the records from
+`/etc/config/dhcp`.
+
+### Migrating from the upstream chart
+
+Up to v0.10.0 the webhook ran as a sidecar in the upstream ExternalDNS chart.
+Its settings map onto this chart as follows; everything else the old example
+values set is now built in.
+
+| Upstream chart | This chart |
+| -------------- | ---------- |
+| `PROVIDER_OPENWRT_OWNERSHIPID` | `ownershipID` |
+| `PROVIDER_OPENWRT_LUCIRPC_HOSTNAME`, `_PORT`, `_SSL`, `_TIMEOUT`, `_INSECURE_SKIP_VERIFY` | `router.hostname`, `.port`, `.tls`, `.timeout`, `.insecureSkipVerify` |
+| `PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME` | `router.username` |
+| `PROVIDER_OPENWRT_LUCIRPC_AUTH_PASSWORD` from a Secret | `router.existingSecret`, `router.existingSecretPasswordKey` |
+| `SSL_CERT_FILE` with `extraVolumes` | `router.caBundle` |
+| `PROVIDER_STATUS_ENABLED` | `recordStatus.enabled` |
+| `domainFilters`, `sources`, `policy`, `interval` | `externalDNS.*` |
+| `hostAliases`, `provider.webhook.serviceMonitor` | `hostAliases`, `serviceMonitor.enabled` |
+
+Keep the same `ownershipID`, or the records on the router are orphaned, see
+[Changing the ownership ID](#changing-the-ownership-id). Uninstall the old
+release before installing this one, so that two ExternalDNS instances never
+write at once. A CRD and a Role applied by hand for the record status can go:
+the chart adopts nothing, but it skips the existing CRD, which is the same
+one, and creates its own Role.
 
 ## What this fork changes
 
@@ -135,44 +215,39 @@ it, however it got onto the router.
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
-| `PROVIDER_OPENWRT_OWNERSHIPID` | — | Marker value, required: the webhook does not start without it. Give each ExternalDNS instance writing to the same router a distinct ID. **An explicit empty value disables ownership and every section is reported — set it only with a registry that keeps ownership itself, such as the [CRD registry](#alternative-the-crd-registry), and never with `policy: sync` otherwise.** |
+| `ownershipID` (`PROVIDER_OPENWRT_OWNERSHIPID`) | — | Marker value, required: the webhook does not start without it. Give each ExternalDNS instance writing to the same router a distinct ID. **An explicit empty value disables ownership and every section is reported — never with `policy: sync`, which the chart refuses.** |
 
 ### Registry: `noop`, not `txt`
 
-The chart defaults to `registry: txt`, which keeps the owner of each record in
+ExternalDNS defaults to `registry: txt`, which keeps the owner of each record in
 a TXT record beside it. This provider has nowhere to store one, so the `txt`
 registry finds no owner on anything the router reports and drops every update
 and delete from the plan: a changed address or a deleted Service never
 reaches the router, while ExternalDNS logs
-`All records are already up to date`. Set `registry: noop`, which plans
+`All records are already up to date`. The chart runs `registry: noop`, which plans
 against `Records()` as reported, and let the marker above decide what that
 holds. With ownership off, `policy: sync` then deletes every record the
 cluster does not ask for.
 
-The [example values](example/values.yaml) do this, and set `domainFilters`
-too. Without a filter, anyone who can create an Ingress or a Service can
+The chart also requires `externalDNS.domainFilters`. Without a filter, anyone who can create an Ingress or a Service can
 publish any name for the whole LAN; with one, `sync` touches no name outside
 it either.
 
-Use the CRD registry below instead when ownership should live in the cluster
-rather than on the router.
+The CRD registry below keeps ownership in the cluster instead; the chart does
+not offer it.
 
 ### Alternative: the CRD registry
 
 ExternalDNS v0.22.0 added the `crd` registry, which keeps ownership in
 `DNSRecord` objects (`externaldns.k8s.io/v1alpha1`) in the cluster instead of
 in TXT records. It is the upstream answer to a provider whose backing store has
-no TXT support, and it needs nothing from this webhook. Chart 1.22.0 installs
-the CRD and, with this, the RBAC for it:
-
-```yaml
-registry: crd
-txtOwnerId: my-cluster
-```
+no TXT support, and it needs nothing from this webhook, but this chart runs
+`noop` only: deploy ExternalDNS yourself, for instance with the upstream chart
+1.22.0 (`registry: crd`, `txtOwnerId`), to use it.
 
 The objects go into the namespace `--namespace` names, `default` when it is
 unset. The registry has no flag of its own for that: `--namespace` also limits
-the sources to that namespace, and the chart sets it only with
+the sources to that namespace, and the upstream chart sets it only with
 `namespaced: true`, to `sourceNamespace` or the release namespace.
 
 It is a genuinely different model, not a second flavour of the marker above.
@@ -226,7 +301,7 @@ section, so it warns that dnsmasq will answer both addresses.
 ### Changing the ownership ID
 
 A section keeps the ID it was written with. Change
-`PROVIDER_OPENWRT_OWNERSHIPID` alone and every record written under the old ID
+`ownershipID` alone and every record written under the old ID
 is orphaned: owned by another ID, it is neither adopted nor deleted, and
 ExternalDNS asks for all of them again. Each A record gets a second section
 next to the orphan, and each CNAME is skipped because its alias is taken. Move
@@ -244,19 +319,14 @@ Then start ExternalDNS with the new ID.
 
 ## Configuration Options
 
-Every environment variable, with its default, is listed in the
-[example values file](example/values.yaml). Deployment is via the upstream
-[external-dns helm chart](https://github.com/kubernetes-sigs/external-dns/tree/master/charts/external-dns)
-with this webhook as a sidecar — see [docs/local.md](docs/local.md) for a
-working local setup.
+The [chart](#installation) sets the variables below from its values; they
+matter on their own only when running the webhook some other way. See
+[docs/local.md](docs/local.md) for a local setup.
 
-The examples track ExternalDNS v0.22.0 (chart 1.22.0). Two of its breaking
-changes reach anything deployed from here:
-
-- annotations lost the `alpha` prefix and have no fallback — use
-  `external-dns.kubernetes.io/hostname`, or start ExternalDNS with
-  `--annotation-prefix=external-dns.alpha.kubernetes.io/`;
-- the chart no longer defaults `policy`, so it has to be set explicitly.
+The chart runs ExternalDNS v0.22.0, whose annotations lost the `alpha` prefix
+and have no fallback: use `external-dns.kubernetes.io/hostname`, or add
+`--annotation-prefix=external-dns.alpha.kubernetes.io/` to
+`externalDNS.extraArgs`.
 
 The webhook itself speaks the same wire contract to every ExternalDNS version
 that has a webhook provider (v0.14 onwards).
@@ -265,7 +335,7 @@ that has a webhook provider (v0.14 onwards).
 
 The webhook serves the provider API on `127.0.0.1:8888`, and the probes and
 metrics on `:8080`, which is what the [specification](https://kubernetes-sigs.github.io/external-dns/latest/docs/tutorials/webhook-provider/)
-asks for and what the chart probes by default.
+asks for and what the chart probes.
 
 Loopback is not decoration. The API authenticates nobody and can rewrite every
 record on the router, so binding it to the pod IP would hand that to anything
@@ -290,7 +360,7 @@ and 10 s by default) — makes it exit, and its container restarts. One call to
 the router may take `PROVIDER_OPENWRT_LUCIRPC_TIMEOUT`, 15 s by default, and a
 change set makes one per record, so a slow router or a large first sync can end
 that way rather than in a 500: raise `--webhook-provider-write-timeout` if it
-does, as the example values do, to 60 s. A change set ExternalDNS gave up on
+does; the chart sets it to 60 s. A change set ExternalDNS gave up on
 is still applied to the end, and the one the restarted ExternalDNS sends waits
 for it rather than writing the same records a second time.
 
@@ -322,21 +392,22 @@ self-signed and issued for the name `OpenWrt` alone, so a router reached as
 
 - **Trust it.** uhttpd writes `/etc/uhttpd.crt` as DER, and Go reads PEM, so
   convert a copy: `openssl x509 -inform der -in uhttpd.crt -out openwrt.pem`.
-  Mount it into the webhook container (`extraVolumes` and
-  `provider.webhook.extraVolumeMounts` in the chart) and set `SSL_CERT_FILE`
-  to its path. Go then adds that file to the roots it trusts.
+  Put it in a ConfigMap and name it in `router.caBundle`
+  (`configMapName`, `key`). The chart mounts it into the webhook container
+  and sets `SSL_CERT_FILE` to it, and Go adds that file to the roots it
+  trusts.
 - **Reach it by a name the certificate holds.** Either use `OpenWrt` as
-  `PROVIDER_OPENWRT_LUCIRPC_HOSTNAME`, mapped to the router's address with the
-  chart's `hostAliases`, or have uhttpd issue one for the name you use:
+  `router.hostname`, mapped to the router's address with the chart's
+  `hostAliases`, or have uhttpd issue one for the name you use:
   `uci set uhttpd.defaults.commonname=router.lan`, `uci commit uhttpd`,
   `rm /etc/uhttpd.crt /etc/uhttpd.key` and `/etc/init.d/uhttpd restart`. The
   generated certificate names a DNS name, never an IP address.
 
-A certificate of your own, from a CA set in `SSL_CERT_FILE` the same way,
+A certificate of your own, from a CA set in `router.caBundle` the same way,
 works too: point uhttpd's `cert` and `key` options at it.
 
-`PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY=true` skips the check, and
-`PROVIDER_OPENWRT_LUCIRPC_SSL=false` drops TLS altogether. Use either only
+`router.insecureSkipVerify: true` skips the check, and `router.tls: false`
+drops TLS altogether. Use either only
 where nothing can sit between the pod and the router: the webhook sends the
 password at every login, and whoever answers in the router's place gets it,
 with everything that login may do. For `root` that is the whole router, which
@@ -357,7 +428,8 @@ written by hand for the same reason — see [Metrics](#metrics).
 
 ## Record status
 
-With `PROVIDER_STATUS_ENABLED=true` the webhook keeps one `OpenWrtRecord`
+With `recordStatus.enabled` (`PROVIDER_STATUS_ENABLED`), on by default in the
+chart, the webhook keeps one `OpenWrtRecord`
 object per record, so whether a record made it onto the router is one
 `kubectl` call away:
 
@@ -384,10 +456,8 @@ on the next run, and the router stays the only source of truth. ExternalDNS
 sends no reference to the Ingress or Service a record came from, so the objects
 cannot point at one.
 
-To enable it, apply [example/record-status.yaml](example/record-status.yaml) —
-the CRD, and a Role and RoleBinding letting the ExternalDNS service account
-write the objects in its own namespace; fix the subject if the release is not
-named `external-dns` in `default` — then set the variable. An API server that
+The chart installs the CRD and a Role letting its service account write the
+objects in the release namespace, and nowhere else. An API server that
 refuses a write costs a warning and
 `external_dns_openwrt_status_errors_total`, never a change set.
 
@@ -407,9 +477,9 @@ this provider's, so hand-made ones show up as `Orphan`.
 
 ## Metrics
 
-`GET :8080/metrics`, in the Prometheus text exposition format; the chart can
-scrape it through
-`provider.webhook.serviceMonitor`.
+`GET :8080/metrics`, in the Prometheus text exposition format. The chart's
+Service exposes it next to ExternalDNS's own on 7979, and
+`serviceMonitor.enabled` scrapes both.
 
 | Metric | Type | What it tells you |
 | ------ | ---- | ----------------- |

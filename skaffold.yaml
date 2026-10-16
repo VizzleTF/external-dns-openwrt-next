@@ -13,19 +13,19 @@ build:
 deploy:
   helm:
     releases:
-    - name: external-dns
-      repo: https://kubernetes-sigs.github.io/external-dns
-      remoteChart: external-dns
-      version: 1.22.0
+    - name: external-dns-openwrt
+      chartPath: charts/external-dns-openwrt
       setValueTemplates:
-        provider:
-          webhook:
-            image:
-              repository: "{{.IMAGE_REPO_webhook}}"
-              tag: "{{.IMAGE_TAG_webhook}}"
-      valuesFiles:
-        - example/values.yaml
+        webhook.image.repository: "{{.IMAGE_REPO_webhook}}"
+        webhook.image.tag: "{{.IMAGE_TAG_webhook}}"
+      setValues:
+        ownershipID: external-dns
+        # Point these at a router you can test on.
+        router.hostname: 192.168.1.1
+        router.username: root
+        # services.yaml creates this Secret.
+        router.existingSecret: openwrt-luci
+        externalDNS.domainFilters[0]: foobar.io
 manifests:
   rawYaml:
     - example/services.yaml
-    - example/record-status.yaml
