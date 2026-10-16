@@ -294,6 +294,11 @@ The skipped record never reaches the router, so ExternalDNS asks for it again
 on every run and the warning repeats, but nothing is applied for it. Remove
 the section in the way, or change the endpoint, to end it.
 
+An A record and a CNAME never share a name either. dnsmasq starts, but answers
+that name with the CNAME alone, so the A record is never served. An A record
+for a name a CNAME holds, and a CNAME for a name an A record holds, are
+skipped the same way, whoever owns the section in the way.
+
 An A record is still written next to a section for the same name with another
 address that carries no marker or another ID. The provider cannot see that
 section, so it warns that dnsmasq will answer both addresses.

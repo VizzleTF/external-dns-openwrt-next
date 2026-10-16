@@ -296,6 +296,23 @@ func (o *openWRT) addRecord(ctx context.Context, index sectionIndex, record DNSR
 		}
 	}
 
+	// dnsmasq answers a name that has a CNAME with the CNAME alone, so an A
+	// record next to one is never served, and a CNAME added next to an A
+	// record hides it. Checked live on 25.12.5.
+	if record.Type == RecordTypeA {
+		if taken := index.named(RecordTypeCNAME, record.Name); len(taken) > 0 {
+			o.log.Warn("skipping A record, its name has a CNAME and dnsmasq answers that instead",
+				append(recordFields(record), sectionFields(taken[0])...)...)
+			return 0, fmt.Sprintf("name already has a CNAME to %s in section %s (owner %q), which dnsmasq answers instead",
+				taken[0].record.Value, taken[0].name, taken[0].record.Owner), nil
+		}
+	} else if taken := index.named(RecordTypeA, record.Name); len(taken) > 0 {
+		o.log.Warn("skipping CNAME, its alias has an A record a CNAME would hide",
+			append(recordFields(record), sectionFields(taken[0])...)...)
+		return 0, fmt.Sprintf("alias already has an A record %s in section %s (owner %q), which a CNAME would hide",
+			taken[0].record.Value, taken[0].name, taken[0].record.Owner), nil
+	}
+
 	// A section this provider does not own is invisible to the plan, so nothing
 	// will ever reconcile the two addresses. It also fires, once, on a section
 	// a later target of the same endpoint is about to adopt.

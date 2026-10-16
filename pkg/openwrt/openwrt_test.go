@@ -455,6 +455,29 @@ func TestNeverWritingACNAMEThatStopsDnsmasq(t *testing.T) {
 			warning: loops,
 		},
 		{
+			name:     "skips an A record on a name a CNAME holds",
+			sections: map[string]map[string]any{"manual": cnameSection("a.lan", "b.lan", "")},
+			add:      []DNSRecord{aRecord("A.lan", "10.0.0.1")},
+			want:     []string{getAll},
+			warning:  "its name has a CNAME",
+		},
+		{
+			name:     "skips a CNAME on a name an A record holds",
+			sections: map[string]map[string]any{"theirs": domainSection("a.lan", "10.0.0.1", "other-instance")},
+			add:      []DNSRecord{cnameRecord("a.lan", "b.lan")},
+			want:     []string{getAll},
+			warning:  "has an A record a CNAME would hide",
+		},
+		{
+			// Removals run first, so an A record turning into a CNAME is no
+			// conflict with itself.
+			name:     "replaces its own A record with a CNAME",
+			sections: map[string]map[string]any{"mine": domainSection("a.lan", "10.0.0.1", testOwner)},
+			remove:   []DNSRecord{aRecord("a.lan", "10.0.0.1")},
+			add:      []DNSRecord{cnameRecord("a.lan", "b.lan")},
+			want:     slices.Concat([]string{getAll, "uci delete dhcp mine"}, writes("a.lan", "b.lan"), []string{apply}),
+		},
+		{
 			name: "writes a CNAME onto a chain that does not loop",
 			sections: map[string]map[string]any{
 				"one": cnameSection("b.lan", "c.lan", ""),
