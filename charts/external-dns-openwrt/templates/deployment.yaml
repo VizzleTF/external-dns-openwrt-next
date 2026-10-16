@@ -1,0 +1,219 @@
+{{- include "external-dns-openwrt.validate" . }}
+{{- $ca := .Values.router.caBundle }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "external-dns-openwrt.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "external-dns-openwrt.labels" . | nindent 4 }}
+spec:
+  # ExternalDNS has no leader election: a second replica, or the old pod
+  # overlapping the new one in a rolling update, would apply every change set
+  # twice against the same router.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "external-dns-openwrt.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "external-dns-openwrt.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or (not .Values.router.existingSecret) .Values.podAnnotations }}
+      annotations:
+        {{- if not .Values.router.existingSecret }}
+        # Rolls the pod when the password changes.
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "external-dns-openwrt.serviceAccountName" . }}
+      # ExternalDNS reads the sources, and the webhook writes the status
+      # objects, through the API server.
+      automountServiceAccountToken: true
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: external-dns
+          image: "{{ .Values.externalDNS.image.repository }}:{{ .Values.externalDNS.image.tag }}"
+          imagePullPolicy: {{ .Values.externalDNS.image.pullPolicy }}
+          args:
+            - --log-level={{ .Values.externalDNS.logLevel }}
+            - --log-format={{ .Values.externalDNS.logFormat }}
+            - --interval={{ .Values.externalDNS.interval }}
+            {{- range .Values.externalDNS.sources }}
+            - --source={{ . }}
+            {{- end }}
+            {{- range .Values.externalDNS.domainFilters }}
+            - --domain-filter={{ . }}
+            {{- end }}
+            - --policy={{ .Values.externalDNS.policy }}
+            # ExternalDNS's default `txt` keeps ownership in TXT records this
+            # provider cannot store: it finds no owner on any record and drops
+            # every update and delete from the plan. ownershipID decides what
+            # sync may touch instead.
+            - --registry=noop
+            # The default is A,AAAA,CNAME. The provider writes A and CNAME
+            # only, and an AAAA endpoint, which any dual-stack Service
+            # produces, would be dropped and warned about on every reconcile.
+            - --managed-record-types=A
+            - --managed-record-types=CNAME
+            - --provider=webhook
+            # The webhook's provider API, on loopback in this pod.
+            - --webhook-provider-url=http://127.0.0.1:8888
+            # ExternalDNS exits on a request unanswered after the read plus
+            # the write timeout, 15 s by default, and a change set makes one
+            # router call per record.
+            - --webhook-provider-write-timeout=60s
+            {{- range .Values.externalDNS.extraArgs }}
+            - {{ . | quote }}
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 7979
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 2
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.externalDNS.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+        - name: webhook
+          image: "{{ .Values.webhook.image.repository }}:{{ .Values.webhook.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.webhook.image.pullPolicy }}
+          env:
+            # The provider API authenticates nobody and can rewrite every
+            # record on the router: loopback only, for the container next to
+            # it. Probes and metrics are on 8080, on every interface.
+            - name: ROUTER_ADDRESS
+              value: 127.0.0.1
+            - name: ROUTER_PORT
+              value: "8888"
+            - name: ROUTER_HEALTHCHECK_PORT
+              value: "8080"
+            - name: LOG_LEVEL
+              value: {{ .Values.webhook.logLevel | quote }}
+            - name: LOG_ENCODING
+              value: {{ .Values.webhook.logEncoding | quote }}
+            - name: PROVIDER_OPENWRT_OWNERSHIPID
+              value: {{ .Values.ownershipID | quote }}
+            - name: PROVIDER_OPENWRT_LUCIRPC_HOSTNAME
+              value: {{ .Values.router.hostname | quote }}
+            - name: PROVIDER_OPENWRT_LUCIRPC_PORT
+              value: {{ .Values.router.port | quote }}
+            - name: PROVIDER_OPENWRT_LUCIRPC_SSL
+              value: {{ .Values.router.tls | quote }}
+            - name: PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY
+              value: {{ .Values.router.insecureSkipVerify | quote }}
+            - name: PROVIDER_OPENWRT_LUCIRPC_TIMEOUT
+              value: {{ .Values.router.timeout | quote }}
+            - name: PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME
+              value: {{ .Values.router.username | quote }}
+            - name: PROVIDER_OPENWRT_LUCIRPC_AUTH_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "external-dns-openwrt.passwordSecret" . }}
+                  key: {{ if .Values.router.existingSecret }}{{ .Values.router.existingSecretPasswordKey }}{{ else }}password{{ end }}
+            - name: PROVIDER_STATUS_ENABLED
+              value: {{ .Values.recordStatus.enabled | quote }}
+            {{- if or $ca.configMapName $ca.secretName }}
+            # Go adds this file to the roots it trusts.
+            - name: SSL_CERT_FILE
+              value: /etc/external-dns-openwrt/ca/{{ $ca.key }}
+            {{- end }}
+            {{- with .Values.webhook.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: http-webhook
+              containerPort: 8080
+          # /healthz answers for the process, not for the router: failing it
+          # over an unreachable router would restart a pod that works and
+          # bring nothing back.
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http-webhook
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 2
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http-webhook
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          {{- with .Values.webhook.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- if or $ca.configMapName $ca.secretName }}
+          volumeMounts:
+            - name: ca
+              mountPath: /etc/external-dns-openwrt/ca
+              readOnly: true
+          {{- end }}
+      {{- if or $ca.configMapName $ca.secretName }}
+      volumes:
+        - name: ca
+          {{- if $ca.configMapName }}
+          configMap:
+            name: {{ $ca.configMapName }}
+          {{- else }}
+          secret:
+            secretName: {{ $ca.secretName }}
+          {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,0 +1,3 @@
+ci/
+*.swp
+.DS_Store

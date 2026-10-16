@@ -1,0 +1,19 @@
+apiVersion: v2
+name: external-dns-openwrt
+description: ExternalDNS with the OpenWrt webhook provider, publishing A and CNAME records to dnsmasq on an OpenWrt router.
+type: application
+# Both track the release tag: release.yaml packages the chart with the
+# version of the tag it builds, and the webhook image tag defaults to
+# appVersion.
+version: 0.11.0
+appVersion: v0.11.0
+kubeVersion: ">=1.25.0-0"
+home: https://github.com/VizzleTF/external-dns-openwrt-next
+sources:
+  - https://github.com/VizzleTF/external-dns-openwrt-next
+  - https://github.com/kubernetes-sigs/external-dns
+keywords:
+  - external-dns
+  - openwrt
+  - dnsmasq
+  - dns
