@@ -24,6 +24,8 @@ For examples of creating DNS records via CRDs or via Ingress/Service annotations
 - A CNAME has one target. An endpoint with more, as `target: a.lan,b.lan`
   gives, is dropped with a warning: dnsmasq does not start with two CNAMEs for
   one alias.
+- A changed CNAME restarts dnsmasq, about a second without DNS and DHCP for
+  the LAN. A changed A record only has the hostfile re-read.
 - Per-record TTLs are not supported. UCI `domain`/`cname` sections carry no TTL —
   dnsmasq answers them with its global `local_ttl` — so `Records()` reports a
   fixed 300 and a requested TTL is stripped rather than planned on every run.
@@ -35,8 +37,10 @@ For examples of creating DNS records via CRDs or via Ingress/Service annotations
 ## What this fork changes
 
 `policy: sync` works, with [`registry: noop`](#registry-noop-not-txt): records
-are created, updated **and** deleted — and with ownership enabled it can only
-ever touch records it created itself.
+are created, updated **and** deleted — and with ownership enabled it touches
+only sections carrying its marker: the ones it wrote, and unmarked ones it
+[adopted](#ownership--required-before-policy-sync) because the cluster asked
+for exactly that record.
 
 - **Deletions apply.** Upstream matched records by name only and mutated the
   slice it was iterating over, so with more than one record in a change set some
@@ -55,17 +59,14 @@ ever touch records it created itself.
   A change set that fails halfway is dropped whole: what it staged never
   reaches the router, and the next one starts clean.
 - **Records go live.** A change set is applied with `uci apply`, which
-  commits it and has procd reload dnsmasq: a changed CNAME restarts it, about
-  a second of DNS/DHCP downtime, and a changed A record only has the hostfile
-  re-read.
+  commits it and has procd reload dnsmasq, see [Limitations](#limitations)
+  for what that costs.
 
 ## Router requirements
 
 OpenWrt 24.10 or 25.12, both checked by the e2e tests, with LuCI. No extra
 packages: the webhook calls ubus over the `/ubus` endpoint uhttpd serves for
-LuCI, and rpcd behind it, both of which come with LuCI. luci-mod-rpc,
-luci-lib-ipkg and luci-compat, which earlier versions needed, can be removed.
-LuCI master has dropped luci-mod-rpc, which is why the webhook moved off it.
+LuCI, and rpcd behind it, both of which come with LuCI.
 
 `root` works with the stock ACLs. A login that can write `dhcp` and nothing
 else is safer, since the password sits in a Kubernetes Secret. On the router:
@@ -112,20 +113,23 @@ Ownership solves it at the source. Every record this provider writes gets an
 extra UCI option, and it reports only the sections carrying it:
 
 ```
-uci add dhcp domain            -> cfg0abc12
-uci set dhcp.cfg0abc12.name=grafana.example.com
-uci set dhcp.cfg0abc12.ip=10.0.0.10
-uci set dhcp.cfg0abc12.external_dns=my-cluster    # ownership marker
+config domain
+	option name 'grafana.example.com'
+	option ip '10.0.0.10'
+	option external_dns 'my-cluster'    # ownership marker
 ```
 
 Anything without the marker is invisible to ExternalDNS: it cannot be updated,
-and it cannot be deleted. The marker is inert — `dhcp_domain_add` reads only
-`name`/`ip` and `dhcp_cname_add` only `cname`/`target`, so it never reaches the
-generated dnsmasq config.
+and it cannot be deleted — unless the cluster asks for exactly that name and
+value, which adopts it, as below. The marker is inert — `dhcp_domain_add` reads
+only `name`/`ip` and `dhcp_cname_add` only `cname`/`target`, so it never
+reaches the generated dnsmasq config.
 
 The marker lives in the `external_dns` UCI option. With ownership on, an
 unmarked section that already matches a record exactly is adopted — stamped
-with the marker — instead of getting a duplicate next to it.
+with the marker — instead of getting a duplicate next to it. From then on it
+is the cluster's: once the cluster stops asking for it, `policy: sync` deletes
+it, however it got onto the router.
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
@@ -153,20 +157,28 @@ rather than on the router.
 
 ### Alternative: the CRD registry
 
-ExternalDNS v0.22.0 added `--registry=crd`, which keeps ownership in `DNSRecord`
-objects (`externaldns.k8s.io/v1alpha1`) in the cluster instead of in TXT
-records. It is the upstream answer to a provider whose backing store has no TXT
-support, and it needs nothing from this webhook:
+ExternalDNS v0.22.0 added the `crd` registry, which keeps ownership in
+`DNSRecord` objects (`externaldns.k8s.io/v1alpha1`) in the cluster instead of
+in TXT records. It is the upstream answer to a provider whose backing store has
+no TXT support, and it needs nothing from this webhook. Chart 1.22.0 installs
+the CRD and, with this, the RBAC for it:
 
+```yaml
+registry: crd
+txtOwnerId: my-cluster
 ```
---registry=crd --txt-owner-id=my-cluster --crd-registry-namespace=external-dns
-```
+
+The objects go into the namespace `--namespace` names, `default` when it is
+unset. The registry has no flag of its own for that: `--namespace` also limits
+the sources to that namespace, and the chart sets it only with
+`namespaced: true`, to `sourceNamespace` or the release namespace.
 
 It is a genuinely different model, not a second flavour of the marker above.
-The CRD registry reads current state from its own `DNSRecord` objects and never
-calls `Records()` at all, so anything on the router it did not create is
-invisible to the plan and `policy: sync` cannot delete it — the same protection
-the marker gives, enforced one layer up.
+The CRD registry plans against its own `DNSRecord` objects, not `Records()` —
+it reads the router only after a create or update, to copy labels back — so
+anything on the router it did not create is invisible to the plan and
+`policy: sync` cannot delete it: the same protection the marker gives,
+enforced one layer up.
 
 What you give up is the router as the source of truth. A record deleted in LuCI
 behind ExternalDNS's back is still Programmed in the cluster, so nothing
@@ -284,7 +296,9 @@ for it rather than writing the same records a second time.
 | -------- | ------- | ------- |
 | `PROVIDER_OPENWRT_LUCIRPC_HOSTNAME` | — | Router address, required |
 | `PROVIDER_OPENWRT_LUCIRPC_PORT` | `443` | uhttpd port |
-| `PROVIDER_OPENWRT_LUCIRPC_SSL` | `true` | Use HTTPS |
+| `PROVIDER_OPENWRT_LUCIRPC_SSL` | `true` | Use HTTPS, see [TLS](#tls) |
+| `PROVIDER_OPENWRT_LUCIRPC_TIMEOUT` | `15` | Seconds one call to the router may take |
+| `PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY` | `false` | Skip verifying the router's certificate, see [TLS](#tls) |
 | `PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME` / `_PASSWORD` | — | `root` or an rpcd login, see [Router requirements](#router-requirements) |
 | `PROVIDER_OPENWRT_OWNERSHIPID` | — | Required, empty disables ownership, see [Ownership](#ownership--required-before-policy-sync) |
 | `ROUTER_ADDRESS` | `127.0.0.1` | Address the provider API binds to |
@@ -293,6 +307,37 @@ for it rather than writing the same records a second time.
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_ENCODING` | `json` | `json` or `console` |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `5` | Graceful shutdown budget |
+
+### TLS
+
+By default the webhook speaks HTTPS to port 443 and verifies the router's
+certificate, and the one uhttpd generates on first boot does not pass: it is
+self-signed and issued for the name `OpenWrt` alone, so a router reached as
+`192.168.1.1` fails the check twice over. Fix both halves, checked on OpenWrt
+25.12:
+
+- **Trust it.** uhttpd writes `/etc/uhttpd.crt` as DER, and Go reads PEM, so
+  convert a copy: `openssl x509 -inform der -in uhttpd.crt -out openwrt.pem`.
+  Mount it into the webhook container (`extraVolumes` and
+  `provider.webhook.extraVolumeMounts` in the chart) and set `SSL_CERT_FILE`
+  to its path. Go then adds that file to the roots it trusts.
+- **Reach it by a name the certificate holds.** Either use `OpenWrt` as
+  `PROVIDER_OPENWRT_LUCIRPC_HOSTNAME`, mapped to the router's address with the
+  chart's `hostAliases`, or have uhttpd issue one for the name you use:
+  `uci set uhttpd.defaults.commonname=router.lan`, `uci commit uhttpd`,
+  `rm /etc/uhttpd.crt /etc/uhttpd.key` and `/etc/init.d/uhttpd restart`. The
+  generated certificate names a DNS name, never an IP address.
+
+A certificate of your own, from a CA set in `SSL_CERT_FILE` the same way,
+works too: point uhttpd's `cert` and `key` options at it.
+
+`PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY=true` skips the check, and
+`PROVIDER_OPENWRT_LUCIRPC_SSL=false` drops TLS altogether. Use either only
+where nothing can sit between the pod and the router: the webhook sends the
+password at every login, and whoever answers in the router's place gets it,
+with everything that login may do. For `root` that is the whole router, which
+is why a [dedicated login](#router-requirements) that can write `dhcp` and
+nothing else matters most here.
 
 ## Dependencies
 
@@ -316,10 +361,10 @@ scrape it through
 | `external_dns_openwrt_build_info{version,goversion}` | gauge | Always 1. `version` comes from the build info ko stamps in. |
 | `external_dns_openwrt_http_requests_total{route,status}` | counter | Provider API traffic. A climbing 500 count is the first sign the router is unreachable. ExternalDNS tries a 500–510 again on its next run and exits on any other failure, see [Two listeners](#two-listeners). |
 | `external_dns_openwrt_http_request_duration_seconds_total{route}` | counter | Seconds spent serving each route; divide by the request count for the mean. A call to a busy router is the slow part. |
-| `external_dns_openwrt_records` | gauge | Records the router reported on the last `Records` call — with ownership on, the ones carrying the marker. |
+| `external_dns_openwrt_records` | gauge | Records the router reported on the last successful `Records` call — with ownership on, the ones carrying the marker. |
 | `external_dns_openwrt_planned_endpoints_total{action}` | counter | Endpoints ExternalDNS asked for, by `create`/`update`/`delete`. Flat lines are a quiet cluster; a steady climb is a plan that never converges. |
 | `external_dns_openwrt_apply_changes_total{result}` | counter | Change sets applied, `success` or `error`. |
-| `external_dns_openwrt_last_apply_success_timestamp_seconds` | gauge | When a change set last reached the router. `time() - <metric>` is the alert worth having. |
+| `external_dns_openwrt_last_apply_success_timestamp_seconds` | gauge | When a change set last reached the router. It stands still while nothing changes, so it makes no staleness alert: alert on `time() - external_dns_controller_last_sync_timestamp_seconds` instead, which ExternalDNS sets after every successful run. |
 | `external_dns_openwrt_dropped_endpoints_total{record_type}` | counter | Endpoints dropped in `AdjustEndpoints`, by type — `AAAA` from a dual-stack Service, `PTR` from `--create-ptr`, anything UCI has no section for, and `A`/`CNAME` with a wildcard name, a name or target dnsmasq cannot take, or, for a CNAME, more than one target. The type is the actionable part: it says which flag to narrow, or that an annotation needs fixing. |
 
 No client library: the exposition format is a few lines per metric, and

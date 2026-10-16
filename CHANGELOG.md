@@ -49,6 +49,24 @@
   `?auth=<token>`, where a proxy or uhttpd log could keep it. ubus takes the
   session in the request body, and the password only at login.
 
+### Docs
+
+- **The README says how to make TLS verification pass.** uhttpd's own
+  certificate is self-signed and names `OpenWrt` only, so the default check
+  fails against a router reached by IP. Skipping it is why a login that can
+  write `dhcp` alone matters.
+- **The suggested alert fired on a cluster with nothing to change.**
+  `external_dns_openwrt_last_apply_success_timestamp_seconds` stands still
+  then; the README now points at
+  `external_dns_controller_last_sync_timestamp_seconds`.
+- **The CRD registry example used a flag that does not exist.** The registry
+  keeps its objects in the `--namespace` namespace; the README now gives the
+  chart values.
+- The README no longer promises that ownership keeps the webhook off every
+  section it did not write: one the cluster asks for exactly is adopted. It
+  also lists `PROVIDER_OPENWRT_LUCIRPC_TIMEOUT` and
+  `PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY`.
+
 ## v0.8.1
 
 ### Security
@@ -288,11 +306,8 @@ that set one of the variables below has to act.
 ### Removed
 
 - **`PROVIDER_OPENWRT_RELOADSTRATEGY=dnsmasq`.** The legacy alias for `reload`,
-  kept since v0.4.0, now fails validation at startup. Use `reload`.
-- **An empty `PROVIDER_OPENWRT_OWNERSHIPOPTION` no longer falls back to
-  `external_dns`.** The default already comes from the config; setting the
-  variable to an empty string now fails validation at startup instead of being
-  silently overridden.
+  kept since v0.4.0, now fails validation at startup, as `reload` does. Use
+  `restart`, the default.
 - **`PROVIDER_OPENWRT_LUCIRPC_RPC_ID`.** The JSON-RPC request id is always `1`;
   nothing on the router reads it. A leftover variable is ignored.
 - The test-only dependencies — ginkgo, gomega and uber mock — and the generated
