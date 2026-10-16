@@ -8,9 +8,9 @@
   master has dropped luci-mod-rpc, so its `/cgi-bin/luci/rpc/*` endpoints have
   no future. The webhook now calls `POST /ubus`, which uhttpd serves for LuCI
   itself, with rpcd behind it: a router with LuCI needs no extra package, and
-  luci-mod-rpc, luci-lib-ipkg and luci-compat can be removed. The variables
-  keep their names, `PROVIDER_OPENWRT_LUCIRPC_*` included, and mean what they
-  did. Checked on OpenWrt 24.10 and 25.12.
+  luci-mod-rpc, and luci-lib-ipkg and luci-compat if nothing else needs them,
+  can be removed. The variables keep their names, `PROVIDER_OPENWRT_LUCIRPC_*`
+  included, and mean what they did. Checked on OpenWrt 24.10 and 25.12.
 - **`PROVIDER_OPENWRT_RELOADSTRATEGY` is removed** and ignored if set. A change
   set is now applied with `uci apply`, which commits it and has procd reload
   dnsmasq the way the init script asks: a changed CNAME restarts dnsmasq, a
@@ -37,6 +37,18 @@
   staged stayed in the LuCI session, and the next commit wrote it along with
   its own changes. rpcd stages per session and no other session sees it, so the
   webhook now drops its session on any failure, and what it staged is gone.
+- **A session lost halfway through a change set applied only the rest of
+  it.** The client logged in again on a refused session, and the fresh one did
+  not see what the old one had staged, so a CNAME update could commit the new
+  CNAME without deleting the old one and keep dnsmasq from starting. rpcd drops
+  its sessions on a restart, as a package install does. With changes staged,
+  a refused session now fails the change set, and the next one starts clean.
+- **A section added at the same time as another session's could be
+  overwritten.** rpcd names an anonymous section after the committed config,
+  so two sessions adding to `dhcp` at once got the same name, and the later
+  apply replaced the other's section: a record saved in LuCI meanwhile, or
+  one of another instance. Sections are now added as
+  `external_dns_<random>`.
 - **`uci-apply` called an apply that always failed.** It ran after the commit,
   found nothing staged and answered `[false,"No data"]`, which was taken for
   success.
@@ -141,8 +153,9 @@
   CNAMEs on the router; an identical unmarked section is adopted as before. The
   rest of the change set goes through, since an error instead would block every
   other change on each retry. ExternalDNS asks for the skipped record again on
-  every run, but nothing is committed and dnsmasq is not restarted for it. A router already in that state needs the extra
-  section removed by hand: `uci delete dhcp.<section>`, `uci commit dhcp` and
+  every run, but nothing is committed and dnsmasq is not restarted for it. A
+  router already in that state needs the extra section removed by hand:
+  `uci delete dhcp.<section>`, `uci commit dhcp` and
   `/etc/init.d/dnsmasq restart`. The README now says how to change the
   ownership ID without orphaning records.
 - **A second A record next to one the provider cannot see is now logged.**

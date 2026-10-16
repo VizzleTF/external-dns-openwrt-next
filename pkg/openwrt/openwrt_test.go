@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -22,8 +23,10 @@ const (
 )
 
 // fakeRPC answers `uci get dhcp` with a fixed router state, `uci add` with
-// section cfg01 and every other call with success, and records each call as
-// one line, its values sorted, e.g. "uci set dhcp cfg01 external_dns=homelab".
+// the section name it was given and every other call with success, and
+// records each call as one line, its values sorted, e.g.
+// "uci set dhcp cfg01 external_dns=homelab". The name `uci add` is given is
+// kept in added instead.
 type fakeRPC struct {
 	sections map[string]map[string]any
 	// fail makes the call spelled exactly like this return an error.
@@ -31,6 +34,7 @@ type fakeRPC struct {
 	// noSection makes `uci add` answer without a section name.
 	noSection bool
 	calls     []string
+	added     []string
 	resets    int
 }
 
@@ -40,9 +44,9 @@ func (f *fakeRPC) Call(_ context.Context, object, method string, args, result an
 		return err
 	}
 	var a struct {
-		Config, Type, Section string
-		Values                map[string]string
-		Rollback              *bool
+		Config, Type, Section, Name string
+		Values                      map[string]string
+		Rollback                    *bool
 	}
 	if err := json.Unmarshal(payload, &a); err != nil {
 		return err
@@ -71,8 +75,9 @@ func (f *fakeRPC) Call(_ context.Context, object, method string, args, result an
 	case "get":
 		data = map[string]any{"values": f.sections}
 	case "add":
+		f.added = append(f.added, a.Name)
 		if !f.noSection {
-			data = map[string]string{"section": "cfg01"}
+			data = map[string]string{"section": a.Name}
 		}
 	}
 	if data == nil || result == nil {
@@ -327,6 +332,17 @@ func TestAdding(t *testing.T) {
 			assertCalls(t, rpc, tc.want...)
 		})
 	}
+
+	t.Run("names each section it adds", func(t *testing.T) {
+		rpc := &fakeRPC{}
+		if err := owning(rpc).ApplyDNSRecords(ctx, nil, []DNSRecord{aRecord("a.bar.com", "1.1.1.1"), aRecord("b.bar.com", "1.1.1.1")}); err != nil {
+			t.Fatal(err)
+		}
+		name := regexp.MustCompile(`^external_dns_[A-Z2-7]{26}$`)
+		if len(rpc.added) != 2 || rpc.added[0] == rpc.added[1] || !name.MatchString(rpc.added[0]) || !name.MatchString(rpc.added[1]) {
+			t.Errorf("section names: got %q, want two distinct external_dns_<random>", rpc.added)
+		}
+	})
 
 	t.Run("rejects incomplete records", func(t *testing.T) {
 		rpc := &fakeRPC{}
@@ -711,6 +727,13 @@ func TestAFailureDropsTheSession(t *testing.T) {
 		{
 			name: "uci add names no section",
 			rpc:  &fakeRPC{sections: mine, noSection: true},
+			add:  []DNSRecord{aRecord("new.bar.com", "2.2.2.2")},
+			want: []string{getAll, "uci delete dhcp mine", "uci add dhcp domain " + stamp + " ip=2.2.2.2 name=new.bar.com"},
+		},
+		{
+			// What the client answers when it lost a session holding changes.
+			name: "the session is lost after a write",
+			rpc:  &fakeRPC{sections: mine, fail: map[string]error{"uci add dhcp domain " + stamp + " ip=2.2.2.2 name=new.bar.com": errors.New("session refused with uci changes staged")}},
 			add:  []DNSRecord{aRecord("new.bar.com", "2.2.2.2")},
 			want: []string{getAll, "uci delete dhcp mine", "uci add dhcp domain " + stamp + " ip=2.2.2.2 name=new.bar.com"},
 		},

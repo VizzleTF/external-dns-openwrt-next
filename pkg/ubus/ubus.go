@@ -84,7 +84,8 @@ type Client interface {
 	// Call runs method on a ubus object with args, as `ubus call` does, and
 	// decodes the data it returns into result. Without data, or with a nil
 	// result, result is left as it is. A session the router refuses is
-	// replaced by a fresh one, which drops whatever the old one staged.
+	// replaced by a fresh one, unless it has staged uci changes: the fresh
+	// one would not see them, and the call fails instead.
 	Call(ctx context.Context, object, method string, args, result any) error
 	// Reset abandons the session, so the next call logs in afresh. rpcd stages
 	// uci changes per session and no other session sees them: abandoning it
@@ -114,6 +115,8 @@ type client struct {
 	// calls that find no session wait for one instead of each opening theirs.
 	mu      sync.Mutex
 	session string
+	// staged is whether the session holds uci changes it has not applied.
+	staged bool
 }
 
 func New(config *Config, log *slog.Logger) Client {
@@ -161,6 +164,12 @@ func (c *client) Call(ctx context.Context, object, method string, args, result a
 	// fresh session tells them apart.
 	var rerr *rpcError
 	if errors.As(err, &rerr) && rerr.Code == codeAccessDenied {
+		// Going on in a fresh session would apply only what is staged from here
+		// on, as if the rest had gone through. The session is kept, so every
+		// call fails until Reset.
+		if c.isStaged(session) {
+			return fmt.Errorf("ubus call %s %s: session refused with uci changes staged: %w", object, method, err)
+		}
 		c.log.Info("re-authenticate")
 		c.forget(session)
 		if session, err = c.login(ctx); err != nil {
@@ -172,6 +181,9 @@ func (c *client) Call(ctx context.Context, object, method string, args, result a
 	if err != nil {
 		return fmt.Errorf("ubus call %s %s: %w", object, method, err)
 	}
+	if object == "uci" {
+		c.track(session, method)
+	}
 	return nil
 }
 
@@ -179,6 +191,28 @@ func (c *client) Reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.session = ""
+	c.staged = false
+}
+
+func (c *client) isStaged(session string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.session == session && c.staged
+}
+
+// track notes what a successful uci call did to what session has staged.
+func (c *client) track(session, method string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.session != session {
+		return
+	}
+	switch method {
+	case "add", "set", "delete":
+		c.staged = true
+	case "apply":
+		c.staged = false
+	}
 }
 
 // login returns the session, logging in when there is none.
@@ -211,6 +245,7 @@ func (c *client) forget(session string) {
 	defer c.mu.Unlock()
 	if c.session == session {
 		c.session = ""
+		c.staged = false
 	}
 }
 

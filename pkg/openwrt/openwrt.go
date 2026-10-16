@@ -2,6 +2,7 @@ package openwrt
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -311,7 +312,10 @@ func (o *openWRT) createSection(ctx context.Context, record DNSRecord) (string, 
 	var data struct {
 		Section string `json:"section"`
 	}
-	args := map[string]any{"config": uciConfig, "type": sectionType, "values": values}
+	// rpcd hands out anonymous names from the committed config, so two sessions
+	// adding at once get the same one, and the later apply overwrites the
+	// other's section, a hand-made one included.
+	args := map[string]any{"config": uciConfig, "type": sectionType, "name": "external_dns_" + rand.Text(), "values": values}
 	if err := o.ubus.Call(ctx, "uci", "add", args, &data); err != nil {
 		return "", err
 	}
