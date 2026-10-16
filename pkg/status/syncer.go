@@ -27,11 +27,6 @@ type Syncer struct {
 	kick   chan struct{}
 	mu     sync.Mutex
 	latest []Record
-
-	// written is what the API server holds, as far as this process knows, so
-	// that only what changed is written. listed says it has been read once.
-	written map[string]writtenRecord
-	listed  bool
 }
 
 type writtenRecord struct {
@@ -45,9 +40,8 @@ func NewSyncer(client *Client, log *slog.Logger, registry *metrics.Registry) *Sy
 		log:    log,
 		errors: registry.Counter(metrics.Prefix+"_status_errors_total",
 			"Failed writes of OpenWrtRecord objects, by operation.", "operation"),
-		now:     time.Now,
-		kick:    make(chan struct{}, 1),
-		written: map[string]writtenRecord{},
+		now:  time.Now,
+		kick: make(chan struct{}, 1),
 	}
 }
 
@@ -81,28 +75,27 @@ func (s *Syncer) Run(ctx context.Context) {
 	}
 }
 
+// sync makes the objects on the API server match records. It reads them back
+// on every pass, so an object deleted or edited by hand is restored on the
+// next one, and transition times survive a restart.
 func (s *Syncer) sync(ctx context.Context, records []Record) {
-	// What a previous process wrote: kept where it still holds, so its
-	// transition times survive a restart, and deleted where it does not.
-	if !s.listed {
-		objects, err := s.client.list(ctx)
-		if err != nil {
-			s.fail("list", "", err)
-			return
+	objects, err := s.client.list(ctx)
+	if err != nil {
+		s.fail("list", "", err)
+		return
+	}
+	live := make(map[string]writtenRecord, len(objects))
+	for _, obj := range objects {
+		live[obj.Metadata.Name] = writtenRecord{
+			record: Record{
+				DNSName:    obj.Spec.DNSName,
+				RecordType: obj.Spec.RecordType,
+				Targets:    obj.Spec.Targets,
+				State:      obj.Status.State,
+				Reason:     obj.Status.Reason,
+			},
+			since: obj.Status.LastTransitionTime,
 		}
-		for _, obj := range objects {
-			s.written[obj.Metadata.Name] = writtenRecord{
-				record: Record{
-					DNSName:    obj.Spec.DNSName,
-					RecordType: obj.Spec.RecordType,
-					Targets:    obj.Spec.Targets,
-					State:      obj.Status.State,
-					Reason:     obj.Status.Reason,
-				},
-				since: obj.Status.LastTransitionTime,
-			}
-		}
-		s.listed = true
 	}
 
 	wanted := make(map[string]bool, len(records))
@@ -110,8 +103,8 @@ func (s *Syncer) sync(ctx context.Context, records []Record) {
 		name := objectName(record)
 		wanted[name] = true
 
-		previous, ok := s.written[name]
-		if ok && previous.record.equal(record) {
+		previous, ok := live[name]
+		if ok && previous.record.equal(record) && previous.since != "" {
 			continue
 		}
 		since := previous.since
@@ -125,20 +118,16 @@ func (s *Syncer) sync(ctx context.Context, records []Record) {
 		obj.Status.State, obj.Status.Reason, obj.Status.LastTransitionTime = record.State, record.Reason, since
 		if err := s.client.apply(ctx, obj); err != nil {
 			s.fail("apply", name, err)
-			continue
 		}
-		s.written[name] = writtenRecord{record: record, since: since}
 	}
 
-	for name := range s.written {
+	for name := range live {
 		if wanted[name] {
 			continue
 		}
 		if err := s.client.remove(ctx, name); err != nil {
 			s.fail("delete", name, err)
-			continue
 		}
-		delete(s.written, name)
 	}
 }
 

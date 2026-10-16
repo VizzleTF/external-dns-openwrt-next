@@ -42,7 +42,7 @@ func run() error {
 
 	var publish func([]status.Record)
 	if cfg.Provider.Status.Enabled {
-		client, err := status.InCluster(cfg.Provider.Status.Namespace)
+		client, err := status.InCluster(cfg.Provider.Status.Namespace, cfg.Provider.OpenWRT.OwnershipID)
 		if err != nil {
 			return fmt.Errorf("setup record status: %w", err)
 		}
