@@ -83,9 +83,12 @@ uci commit rpcd
 EOF
 	retry login "$ip"
 
+	# One package at a time: two sessions adding a section to dhcp at once are
+	# handed the same anonymous name, and whichever applies last overwrites the
+	# other's section.
 	OPENWRT_E2E_HOST=$ip \
 		OPENWRT_E2E_ROOT_PASSWORD=$root_password \
 		OPENWRT_E2E_USERNAME=$username \
 		OPENWRT_E2E_PASSWORD=$password \
-		go test -tags e2e -count=1 ./...
+		go test -tags e2e -count=1 -p 1 ./...
 done

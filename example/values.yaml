@@ -16,7 +16,7 @@ extraArgs:
   - --managed-record-types=A
   - --managed-record-types=CNAME
   # ExternalDNS exits on a request unanswered after the read plus the write
-  # timeout, 15 s by default, and a change set makes several LuCI calls per
+  # timeout, 15 s by default, and a change set makes a router call per
   # record.
   - --webhook-provider-write-timeout=60s
 provider:
@@ -52,10 +52,6 @@ provider:
       # Serves /healthz and /metrics.
       - name: ROUTER_HEALTHCHECK_PORT
         value: "8080"
-      # restart | uci-apply | none — see README. `restart` is the only
-      # strategy that applies both A and CNAME records.
-      - name: PROVIDER_OPENWRT_RELOADSTRATEGY
-        value: restart
       # Ownership: only records carrying this marker are managed. Required
       # before policy=sync, otherwise ExternalDNS may delete records it did
       # not create. Empty disables ownership.

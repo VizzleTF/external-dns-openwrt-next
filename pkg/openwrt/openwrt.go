@@ -2,39 +2,35 @@ package openwrt
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net/netip"
 
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/lucirpc"
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/ubus"
 	"log/slog"
 )
 
-const (
-	dnsmasqRestartCommand = "/etc/init.d/dnsmasq restart"
-	uciConfig             = "dhcp"
-)
+const uciConfig = "dhcp"
 
 type OpenWRT interface {
 	// GetDNSRecords returns the records this provider manages, keyed by UCI
 	// section name. With ownership enabled, sections without the marker are
 	// left out.
 	GetDNSRecords(context.Context) (map[string]DNSRecord, error)
-	// ApplyDNSRecords removes and adds records in a single pass, then commits
-	// and reloads dnsmasq once. Both slices may be empty.
+	// ApplyDNSRecords removes and adds records in a single pass, then applies
+	// them at once. Both slices may be empty.
 	ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) error
 }
 
 type openWRT struct {
-	lucirpc        lucirpc.LuciRPC
-	log            *slog.Logger
-	reloadStrategy string
-	ownershipID    string
+	ubus        ubus.Client
+	log         *slog.Logger
+	ownershipID string
 }
 
 func New(cfg *Config, log *slog.Logger) (OpenWRT, error) {
-	if err := validateReloadStrategy(cfg.ReloadStrategy); err != nil {
-		return nil, err
+	if cfg.Ubus.Hostname == "" {
+		return nil, errors.New("router hostname is not set, set PROVIDER_OPENWRT_LUCIRPC_HOSTNAME")
 	}
 
 	if cfg.OwnershipID != "" {
@@ -45,10 +41,9 @@ func New(cfg *Config, log *slog.Logger) (OpenWRT, error) {
 	}
 
 	return &openWRT{
-		lucirpc:        lucirpc.New(cfg.LuciRPC, log),
-		log:            log,
-		reloadStrategy: cfg.ReloadStrategy,
-		ownershipID:    cfg.OwnershipID,
+		ubus:        ubus.New(cfg.Ubus, log),
+		log:         log,
+		ownershipID: cfg.OwnershipID,
 	}, nil
 }
 
@@ -80,21 +75,18 @@ func (o *openWRT) GetDNSRecords(ctx context.Context) (map[string]DNSRecord, erro
 
 // readSections returns every domain/cname section, owned or not.
 func (o *openWRT) readSections(ctx context.Context) (map[string]DNSRecord, error) {
-	result, err := o.lucirpc.Uci(ctx, "get_all", []string{uciConfig})
-	if err != nil {
+	// `uci get dhcp` also returns dnsmasq/dhcp/host/odhcpd sections, and
+	// option values may be lists rather than strings, so decode loosely and
+	// pick out what we understand.
+	var data struct {
+		Values map[string]map[string]any `json:"values"`
+	}
+	if err := o.ubus.Call(ctx, "uci", "get", map[string]string{"config": uciConfig}, &data); err != nil {
 		return nil, err
 	}
 
-	// `uci get_all dhcp` also returns dnsmasq/dhcp/host/odhcpd sections, and
-	// option values may be lists rather than strings, so decode loosely and
-	// pick out what we understand.
-	var raw map[string]map[string]any
-	if err := json.Unmarshal([]byte(result), &raw); err != nil {
-		return nil, fmt.Errorf("decode uci %s: %w", uciConfig, err)
-	}
-
-	records := make(map[string]DNSRecord, len(raw))
-	for section, options := range raw {
+	records := make(map[string]DNSRecord, len(data.Values))
+	for section, options := range data.Values {
 		record, ok := o.parseSection(options)
 		if !ok {
 			continue
@@ -157,10 +149,19 @@ func stringOption(options map[string]any, key string) string {
 // change set on failure, so removing an already absent record — or adding one
 // that is already there — must not be an error; otherwise a single stale entry
 // blocks every other change forever.
-func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) error {
+func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) (err error) {
 	if len(remove) == 0 && len(add) == 0 {
 		return nil
 	}
+
+	// rpcd keeps what a session staged until it is applied, and no other
+	// session sees it: dropping the session on a failure keeps the next change
+	// set from applying half of this one along with its own.
+	defer func() {
+		if err != nil {
+			o.ubus.Reset()
+		}
+	}()
 
 	// Adoption has to see unowned sections too, so read the unfiltered set and
 	// apply ownership per operation.
@@ -189,15 +190,19 @@ func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) 
 	}
 
 	if changed == 0 {
-		o.log.Debug("nothing changed, skipping commit")
+		o.log.Debug("nothing changed, skipping apply")
 		return nil
 	}
 
-	if _, err := o.lucirpc.Uci(ctx, "commit", []string{uciConfig}); err != nil {
-		return fmt.Errorf("commit %s: %w", uciConfig, err)
+	// Commits what the session staged, and procd reloads dnsmasq for it: a
+	// changed CNAME restarts it, a changed A record only has the hostfile
+	// re-read. A rollback would revert the change unless confirmed in time.
+	err = o.ubus.Call(ctx, "uci", "apply", map[string]bool{"rollback": false}, nil)
+	if errors.Is(err, ubus.ErrNoData) {
+		o.log.Debug("nothing staged, nothing to apply")
+		return nil
 	}
-
-	return o.reload(ctx)
+	return err
 }
 
 // removeRecord deletes every owned section matching the record. Sections that
@@ -210,7 +215,7 @@ func (o *openWRT) removeRecord(ctx context.Context, index sectionIndex, record D
 	}
 
 	for _, section := range sections {
-		if _, err := o.lucirpc.Uci(ctx, "delete", []string{uciConfig, section}); err != nil {
+		if err := o.ubus.Call(ctx, "uci", "delete", map[string]string{"config": uciConfig, "section": section}, nil); err != nil {
 			return 0, fmt.Errorf("delete %s (%s): %w", record.Name, section, err)
 		}
 		index.drop(record.Key(), section)
@@ -297,65 +302,29 @@ func (o *openWRT) createSection(ctx context.Context, record DNSRecord) (string, 
 	if record.Type == RecordTypeCNAME {
 		sectionType, nameOption, valueOption = sectionTypeCName, optionCName, optionTarget
 	}
-	options := [][2]string{{nameOption, record.Name}, {valueOption, record.Value}}
+	values := map[string]string{nameOption: record.Name, valueOption: record.Value}
 
 	if o.ownershipEnabled() {
-		options = append(options, [2]string{ownershipOption, o.ownershipID})
+		values[ownershipOption] = o.ownershipID
 	}
 
-	section, err := o.lucirpc.Uci(ctx, "add", []string{uciConfig, sectionType})
-	if err != nil {
+	var data struct {
+		Section string `json:"section"`
+	}
+	args := map[string]any{"config": uciConfig, "type": sectionType, "values": values}
+	if err := o.ubus.Call(ctx, "uci", "add", args, &data); err != nil {
 		return "", err
 	}
-
-	for _, option := range options {
-		if _, err := o.lucirpc.Uci(ctx, "set", []string{uciConfig, section, option[0], option[1]}); err != nil {
-			return "", err
-		}
+	if data.Section == "" {
+		return "", errors.New("uci add returned no section")
 	}
 
-	return section, nil
+	return data.Section, nil
 }
 
 func (o *openWRT) setOwner(ctx context.Context, section string) error {
-	_, err := o.lucirpc.Uci(ctx, "set", []string{uciConfig, section, ownershipOption, o.ownershipID})
-	return err
-}
-
-// reload makes dnsmasq pick up the committed configuration.
-//
-// `uci commit` only writes /etc/config/dhcp — it neither regenerates
-// /var/etc/dnsmasq.conf.* nor signals the daemon, so without this step records
-// stay invisible until something else restarts the service.
-func (o *openWRT) reload(ctx context.Context) error {
-	switch o.reloadStrategy {
-	case ReloadStrategyNone:
-		o.log.Debug("reload disabled, dnsmasq keeps serving the previous configuration")
-		return nil
-
-	case ReloadStrategyRestart:
-		// The only strategy that applies both record types. A records go to
-		// the hostfile, which a reload could pick up, but CNAMEs are `--cname=`
-		// entries in the config file that dnsmasq reads once at startup.
-		if _, err := o.lucirpc.Sys(ctx, "call", []string{dnsmasqRestartCommand}); err != nil {
-			return fmt.Errorf("restart dnsmasq: %w", err)
-		}
-
-	case ReloadStrategyUciApply:
-		// MUST be called with no arguments. LuCI's JSON-RPC binding is
-		// `function apply(config) return uci:apply(config) end`, but the
-		// underlying signature is `apply(self, rollback)` — so any non-empty
-		// argument is read as rollback=true and starts a ubus apply with a
-		// >=90s rollback timer that REVERTS the change unless it is confirmed
-		// out of band. With no argument it commits every pending config and
-		// applies with rollback=false.
-		if _, err := o.lucirpc.Uci(ctx, "apply", []string{}); err != nil {
-			return fmt.Errorf("uci apply: %w", err)
-		}
-	}
-
-	o.log.Debug("reloaded dnsmasq", slog.String("strategy", o.reloadStrategy))
-	return nil
+	args := map[string]any{"config": uciConfig, "section": section, "values": map[string]string{ownershipOption: o.ownershipID}}
+	return o.ubus.Call(ctx, "uci", "set", args, nil)
 }
 
 func recordFields(record DNSRecord) []any {

@@ -155,8 +155,8 @@ func (w *Webhook) ApplyChanges(rw http.ResponseWriter, req *http.Request) {
 	w.metrics.planned.Add(float64(len(changes.Delete)), "delete")
 
 	// ExternalDNS gives up after its read plus write timeout, 15 s by default,
-	// and a change set cut off there would leave writes staged on the router
-	// for the next commit to carry. Finish it instead.
+	// and a change set cut off there would be dropped whole and redone on the
+	// next run. Finish it instead.
 	w.applyMu.Lock()
 	defer w.applyMu.Unlock()
 
