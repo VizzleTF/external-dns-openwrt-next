@@ -146,6 +146,7 @@ func assertWarned(t *testing.T, logged *bytes.Buffer, want string) {
 func owning(rpc *fakeRPC) *openWRT {
 	return &openWRT{
 		ubus:        rpc,
+		reader:      rpc,
 		log:         slog.New(slog.DiscardHandler),
 		ownershipID: testOwner,
 	}
@@ -171,6 +172,20 @@ func assertCalls(t *testing.T, rpc *fakeRPC, want ...string) {
 }
 
 func TestReadingRecords(t *testing.T) {
+	t.Run("reads in a session of its own, not the one a change set stages in", func(t *testing.T) {
+		writer := &fakeRPC{sections: map[string]map[string]any{}}
+		reader := &fakeRPC{sections: map[string]map[string]any{"x": domainSection("foobar", "1.1.1.1", testOwner)}}
+		o := owning(writer)
+		o.reader = reader
+
+		records, err := o.GetDNSRecords(context.Background())
+		if err != nil || len(records) != 1 {
+			t.Fatalf("got %v, %v", records, err)
+		}
+		assertCalls(t, reader, getAll)
+		assertCalls(t, writer)
+	})
+
 	t.Run("normalises section types and ignores everything else", func(t *testing.T) {
 		rpc := &fakeRPC{sections: map[string]map[string]any{
 			"x": domainSection("foobar", "1.1.1.1", ""),
@@ -807,5 +822,10 @@ func TestNew(t *testing.T) {
 	cfg.Ubus.Hostname = "192.168.1.1"
 	if _, err := New(cfg, slog.New(slog.DiscardHandler)); err != nil {
 		t.Error(err)
+	}
+
+	cfg.Ubus.Timeout = 0
+	if _, err := New(cfg, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "PROVIDER_OPENWRT_LUCIRPC_TIMEOUT") {
+		t.Errorf("no timeout: got %v", err)
 	}
 }

@@ -147,7 +147,7 @@ func New(config *Config, log *slog.Logger) Client {
 		config:     config,
 		httpClient: httpClient,
 		log:        log,
-		url:        proto + config.Hostname + ":" + strconv.Itoa(config.Port) + path,
+		url:        proto + net.JoinHostPort(config.Hostname, strconv.Itoa(config.Port)) + path,
 	}
 }
 

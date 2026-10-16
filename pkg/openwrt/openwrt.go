@@ -31,14 +31,23 @@ type Skip struct {
 }
 
 type openWRT struct {
-	ubus        ubus.Client
+	ubus ubus.Client
+	// reader serves GetDNSRecords from a session of its own. rpcd shows a
+	// session its own staged changes, so reading in the one a change set runs
+	// in, which outlives the ExternalDNS that sent it, would report records
+	// that are not applied yet and may never be.
+	reader      ubus.Client
 	log         *slog.Logger
 	ownershipID string
 }
 
 func New(cfg *Config, log *slog.Logger) (OpenWRT, error) {
 	if cfg.Ubus.Hostname == "" {
-		return nil, errors.New("router hostname is not set, set PROVIDER_OPENWRT_LUCIRPC_HOSTNAME")
+		return nil, errors.New("router hostname is not set: set PROVIDER_OPENWRT_LUCIRPC_HOSTNAME, or router.hostname in the chart")
+	}
+	if cfg.Ubus.Timeout <= 0 {
+		// Zero would leave a stalled router holding every change set forever.
+		return nil, fmt.Errorf("router timeout must be at least 1 second, got %d: set PROVIDER_OPENWRT_LUCIRPC_TIMEOUT", cfg.Ubus.Timeout)
 	}
 
 	if cfg.OwnershipID != "" {
@@ -50,6 +59,7 @@ func New(cfg *Config, log *slog.Logger) (OpenWRT, error) {
 
 	return &openWRT{
 		ubus:        ubus.New(cfg.Ubus, log),
+		reader:      ubus.New(cfg.Ubus, log),
 		log:         log,
 		ownershipID: cfg.OwnershipID,
 	}, nil
@@ -60,7 +70,7 @@ func (o *openWRT) ownershipEnabled() bool { return o.ownershipID != "" }
 // GetDNSRecords reads every dhcp section and keeps the ones this provider is
 // responsible for.
 func (o *openWRT) GetDNSRecords(ctx context.Context) (map[string]DNSRecord, error) {
-	all, err := o.readSections(ctx)
+	all, err := o.readSections(ctx, o.reader)
 	if err != nil {
 		return nil, err
 	}
@@ -82,14 +92,14 @@ func (o *openWRT) GetDNSRecords(ctx context.Context) (map[string]DNSRecord, erro
 }
 
 // readSections returns every domain/cname section, owned or not.
-func (o *openWRT) readSections(ctx context.Context) (map[string]DNSRecord, error) {
+func (o *openWRT) readSections(ctx context.Context, client ubus.Client) (map[string]DNSRecord, error) {
 	// `uci get dhcp` also returns dnsmasq/dhcp/host/odhcpd sections, and
 	// option values may be lists rather than strings, so decode loosely and
 	// pick out what we understand.
 	var data struct {
 		Values map[string]map[string]any `json:"values"`
 	}
-	if err := o.ubus.Call(ctx, "uci", "get", map[string]string{"config": uciConfig}, &data); err != nil {
+	if err := client.Call(ctx, "uci", "get", map[string]string{"config": uciConfig}, &data); err != nil {
 		return nil, err
 	}
 
@@ -173,7 +183,7 @@ func (o *openWRT) ApplyDNSRecords(ctx context.Context, remove, add []DNSRecord) 
 
 	// Adoption has to see unowned sections too, so read the unfiltered set and
 	// apply ownership per operation.
-	all, err := o.readSections(ctx)
+	all, err := o.readSections(ctx, o.ubus)
 	if err != nil {
 		return nil, err
 	}
