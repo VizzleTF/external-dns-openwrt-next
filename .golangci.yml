@@ -1,7 +1,14 @@
 version: "2"
 
+linters:
+  enable:
+    # Errors are wrapped with %w throughout; a == or a type assertion on one
+    # misses the wrapped error it is meant to catch.
+    - errorlint
+
 # Formatting is part of the build, not a matter of taste: CI runs the same
 # linter binary, so a misformatted file fails there instead of drifting.
 formatters:
   enable:
     - gofmt
+    - goimports

@@ -40,13 +40,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: echo "$GITHUB_TOKEN" | ko login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
 
+      # A manual run builds whatever ref it is pointed at, which must not
+      # replace the image `latest` names.
       - name: Build and push
         env:
           KO_DOCKER_REPO: ${{ steps.repo.outputs.value }}
+          TAGS: ${{ github.event_name == 'push' && format('{0},latest', github.ref_name) || github.ref_name }}
         run: |
           ko build ./cmd/webhook \
             --bare \
             --platform=linux/amd64,linux/arm64 \
-            --tags="${GITHUB_REF_NAME},latest" \
+            --tags="$TAGS" \
             --image-refs=image-refs.txt
           cat image-refs.txt
