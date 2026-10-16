@@ -3,7 +3,7 @@
 ## v0.11.0
 
 - **A chart of its own.** `oci://ghcr.io/vizzletf/charts/external-dns-openwrt`
-  runs ExternalDNS v0.22.0 and the webhook in one pod. Four values cover an
+  runs ExternalDNS v0.23.0 and the webhook in one pod. Four values cover an
   install: `ownershipID`, `router.hostname`, `router.existingSecret` (or
   `router.password`) and `externalDNS.domainFilters`. The chart creates the
   ClusterRole for the chosen sources only and, for the record status mirror,
@@ -12,13 +12,35 @@
   What the provider needs — `--registry=noop`, A and CNAME only, the provider
   API on loopback, a 60 s write timeout, one replica with `Recreate` — is
   built in, and it refuses to render without a domain filter, or with
-  ownership off under `policy: sync`. The webhook itself is unchanged.
+  ownership off under `policy: sync`.
 - **The upstream chart is no longer documented.** `example/values.yaml` and
   `example/record-status.yaml` are gone; README has a table mapping their
   settings onto the chart's values. A webhook sidecar in the upstream chart
   keeps working as before. To move, uninstall the old release, keep the same
-  `ownershipID`, and install the chart; a CRD applied by hand is skipped and
-  can stay, a hand-made Role and RoleBinding can be deleted.
+  `ownershipID`, and install the chart.
+- **The webhook starts before ExternalDNS.** It runs as a native sidecar, so
+  ExternalDNS no longer exits and restarts while the webhook image is still
+  being pulled. The chart needs Kubernetes 1.29 or later. Both containers
+  request resources, and the pod gets a 30 s grace period.
+- **ExternalDNS v0.23.0.** Old `external-dns.alpha.kubernetes.io/` annotations
+  are read with `--enable-legacy-annotation-prefix` in `externalDNS.extraArgs`.
+- **Installing over hand-made objects.** A Role, RoleBinding or ServiceAccount
+  named like the release makes `helm install` fail: delete them first. A CRD
+  applied by hand can stay.
+- **The status mirror rebuilds itself.** It reads the objects back on every
+  run, so one deleted or edited by hand is restored, and each carries the
+  instance's ownership ID as a label: two instances in one namespace no
+  longer delete each other's objects.
+- **Records are read in a session of their own.** A change set ExternalDNS
+  gave up on no longer shows its unapplied changes to the next run, or to the
+  status mirror as `Ready`.
+- **An A record and a CNAME never share a name.** dnsmasq answers such a name
+  with the CNAME only. The second one is skipped with a warning and shows as
+  `Conflict`.
+- **Smaller fixes.** An IPv6 router address works; a router timeout below
+  1 s is refused at startup; a shutdown that times out on a running change
+  set logs a warning instead of exiting 1, and the budget is 25 s instead
+  of 5 s.
 - **CI installs the chart.** `hack/chart-lint.sh` renders it with each values
   file in `ci/` and checks the refusals, and `hack/chart-e2e.sh` installs it
   into k3s against an OpenWrt router, both in docker. Releases publish the

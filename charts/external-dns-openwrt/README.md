@@ -13,9 +13,14 @@ externalDNS:
   domainFilters: [lan]
 ```
 
+The Secret has to exist before the pod starts, so create the namespace and
+the Secret first:
+
 ```sh
+kubectl create namespace external-dns-openwrt
+kubectl -n external-dns-openwrt create secret generic openwrt-router --from-literal=password='PASSWORD'
 helm install external-dns-openwrt oci://ghcr.io/vizzletf/charts/external-dns-openwrt \
-  -n external-dns-openwrt --create-namespace -f values.yaml
+  -n external-dns-openwrt -f values.yaml
 kubectl -n external-dns-openwrt get owr
 ```
 

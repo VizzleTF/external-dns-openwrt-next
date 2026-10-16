@@ -61,7 +61,9 @@ jobs:
 
       # The chart's version is the tag without its `v`, and its appVersion,
       # the webhook image tag it defaults to, is the tag itself. A manual run
-      # from a branch publishes no chart.
+      # from a branch publishes no chart. ghcr creates a new package private:
+      # after the first push, make vizzletf/charts/external-dns-openwrt public
+      # in its Package settings, or `helm install` asks for a login.
       - name: Package and push chart
         if: github.ref_type == 'tag'
         env:
