@@ -1,5 +1,48 @@
 # Changelog
 
+## v0.9.0
+
+### Breaking
+
+- **The webhook talks to the router over ubus instead of LuCI RPC.** LuCI
+  master has dropped luci-mod-rpc, so its `/cgi-bin/luci/rpc/*` endpoints have
+  no future. The webhook now calls `POST /ubus`, which uhttpd serves for LuCI
+  itself, with rpcd behind it: a router with LuCI needs no extra package, and
+  luci-mod-rpc, luci-lib-ipkg and luci-compat can be removed. The variables
+  keep their names, `PROVIDER_OPENWRT_LUCIRPC_*` included, and mean what they
+  did. Checked on OpenWrt 24.10 and 25.12.
+- **`PROVIDER_OPENWRT_RELOADSTRATEGY` is removed** and ignored if set. A change
+  set is now applied with `uci apply`, which commits it and has procd reload
+  dnsmasq the way the init script asks: a changed CNAME restarts dnsmasq, a
+  changed A record only has the hostfile re-read, with no downtime. `none` no
+  longer exists, and nothing but `dhcp` is ever applied, whatever else an
+  admin left staged.
+- **`PROVIDER_OPENWRT_LUCIRPC_HOSTNAME` is required.** It had no default, so an
+  unset hostname only failed on the first call to the router; it now fails at
+  startup.
+
+### Fixed
+
+- **Writes could fail silently.** LuCI RPC answers a `uci set` on a section
+  that is gone with `{"result":null,"error":null}`, which read as success.
+  Every write now checks the ubus status, and an add that names no section
+  fails the change set.
+- **A change set that failed halfway leaked into the next one.** What it had
+  staged stayed in the LuCI session, and the next commit wrote it along with
+  its own changes. rpcd stages per session and no other session sees it, so the
+  webhook now drops its session on any failure, and what it staged is gone.
+- **`uci-apply` called an apply that always failed.** It ran after the commit,
+  found nothing staged and answered `[false,"No data"]`, which was taken for
+  success.
+- **A failed dnsmasq restart counted as a success.** `rpc/sys` answers `call`
+  with the command's exit status, which was discarded.
+
+### Security
+
+- **The session token no longer travels in the URL.** LuCI RPC took it as
+  `?auth=<token>`, where a proxy or uhttpd log could keep it. ubus takes the
+  session in the request body, and the password only at login.
+
 ## v0.8.1
 
 ### Security

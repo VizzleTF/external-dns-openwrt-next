@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/config"
-	"github.com/VizzleTF/external-dns-openwrt-next/pkg/openwrt"
 )
 
 // These are the variable names real deployments set. The config layer was
@@ -18,7 +17,8 @@ func TestEnvironmentVariableNames(t *testing.T) {
 	t.Setenv("ROUTER_ADDRESS", "0.0.0.0")
 	t.Setenv("ROUTER_PORT", "9999")
 	t.Setenv("ROUTER_HEALTHCHECK_PORT", "9090")
-	t.Setenv("PROVIDER_OPENWRT_RELOADSTRATEGY", openwrt.ReloadStrategyUciApply)
+	// Removed in v0.9.0. A deployment that still sets it has to start.
+	t.Setenv("PROVIDER_OPENWRT_RELOADSTRATEGY", "restart")
 	t.Setenv("PROVIDER_OPENWRT_OWNERSHIPID", "homelab")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_HOSTNAME", "10.0.0.1")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_PORT", "8443")
@@ -33,7 +33,7 @@ func TestEnvironmentVariableNames(t *testing.T) {
 		t.Fatalf("read config: %v", err)
 	}
 
-	rpc := cfg.Provider.OpenWRT.LuciRPC
+	rpc := cfg.Provider.OpenWRT.Ubus
 
 	checks := []struct {
 		name string
@@ -46,7 +46,6 @@ func TestEnvironmentVariableNames(t *testing.T) {
 		{"ROUTER_ADDRESS", cfg.Router.Address, "0.0.0.0"},
 		{"ROUTER_PORT", cfg.Router.Port, "9999"},
 		{"ROUTER_HEALTHCHECK_PORT", cfg.Router.HealthCheckPort, "9090"},
-		{"PROVIDER_OPENWRT_RELOADSTRATEGY", cfg.Provider.OpenWRT.ReloadStrategy, openwrt.ReloadStrategyUciApply},
 		{"PROVIDER_OPENWRT_OWNERSHIPID", cfg.Provider.OpenWRT.OwnershipID, "homelab"},
 		{"PROVIDER_OPENWRT_LUCIRPC_HOSTNAME", rpc.Hostname, "10.0.0.1"},
 		{"PROVIDER_OPENWRT_LUCIRPC_PORT", rpc.Port, 8443},
@@ -78,9 +77,6 @@ func TestDefaultsSurviveAnEmptyEnvironment(t *testing.T) {
 	}
 	if cfg.Router.HealthCheckPort != "8080" {
 		t.Errorf("healthcheck port: got %q, want 8080", cfg.Router.HealthCheckPort)
-	}
-	if cfg.Provider.OpenWRT.ReloadStrategy != openwrt.ReloadStrategyRestart {
-		t.Errorf("reload strategy: got %q", cfg.Provider.OpenWRT.ReloadStrategy)
 	}
 	if cfg.Provider.OpenWRT.OwnershipID != "" {
 		t.Errorf("ownership must stay off by default, got %q", cfg.Provider.OpenWRT.OwnershipID)

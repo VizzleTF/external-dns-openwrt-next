@@ -6,7 +6,7 @@ For examples of creating DNS records via CRDs or via Ingress/Service annotations
 
 > **Fork.** Continuation of [renanqts/external-dns-openwrt-webhook](https://github.com/renanqts/external-dns-openwrt-webhook),
 > whose last code change was in February 2025. It adds working create/update/delete,
-> record ownership, multi-target endpoints and an explicit dnsmasq reload.
+> record ownership, multi-target endpoints and all-or-nothing change sets.
 > See [CHANGELOG.md](./CHANGELOG.md).
 >
 > Images: `ghcr.io/vizzletf/external-dns-openwrt-next` (linux/amd64, linux/arm64).
@@ -51,24 +51,53 @@ ever touch records it created itself.
 - **Idempotent.** Deleting an absent record or adding an existing one is a
   no-op instead of an error, so one stale entry can no longer wedge every
   subsequent change.
-- **One commit per change set**, and nothing is committed when nothing changed.
-- **dnsmasq is reloaded.** `uci commit` only writes `/etc/config/dhcp`; it does
-  not regenerate `/var/etc/dnsmasq.conf.*` nor signal the daemon, so upstream's
-  records stayed invisible until something else restarted the service.
+- **One apply per change set**, and nothing is applied when nothing changed.
+  A change set that fails halfway is dropped whole: what it staged never
+  reaches the router, and the next one starts clean.
+- **Records go live.** A change set is applied with `uci apply`, which
+  commits it and has procd reload dnsmasq: a changed CNAME restarts it, about
+  a second of DNS/DHCP downtime, and a changed A record only has the hostfile
+  re-read.
 
-## OpenWRT Prerequisites
-You must install the following packages in OpenWRT for the webhook to function:
-- luci-mod-rpc
-- luci-lib-ipkg
-- luci-compat
+## Router requirements
 
-```bash
-# OpenWrt <= 24
-opkg update && opkg install luci-mod-rpc luci-lib-ipkg luci-compat
+OpenWrt 24.10 or 25.12, both checked by the e2e tests, with LuCI. No extra
+packages: the webhook calls ubus over the `/ubus` endpoint uhttpd serves for
+LuCI, and rpcd behind it, both of which come with LuCI. luci-mod-rpc,
+luci-lib-ipkg and luci-compat, which earlier versions needed, can be removed.
+LuCI master has dropped luci-mod-rpc, which is why the webhook moved off it.
 
-# OpenWrt >= 25 (apk)
-apk update && apk add luci-mod-rpc luci-lib-ipkg luci-compat
+`root` works with the stock ACLs. A login that can write `dhcp` and nothing
+else is safer, since the password sits in a Kubernetes Secret. On the router:
+
+```sh
+cat > /usr/share/rpcd/acl.d/external-dns.json <<'EOF'
+{
+	"external-dns": {
+		"description": "external-dns: manage DNS records in dhcp",
+		"read": {
+			"ubus": { "uci": [ "get" ] },
+			"uci": [ "dhcp" ]
+		},
+		"write": {
+			"ubus": { "uci": [ "add", "set", "delete", "apply" ] },
+			"uci": [ "dhcp" ]
+		}
+	}
+}
+EOF
+uci add rpcd login
+uci set rpcd.@login[-1].username='external-dns'
+uci set rpcd.@login[-1].password="$(uhttpd -m 'PASSWORD')"
+uci add_list rpcd.@login[-1].read='external-dns'
+uci add_list rpcd.@login[-1].write='external-dns'
+uci commit rpcd
+/etc/init.d/rpcd restart
 ```
+
+Then set `PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME=external-dns` and the
+password. Any user but `root` needs an rpcd login like this one: a system
+account alone cannot log in to ubus.
 
 ## Ownership — required before `policy: sync`
 
@@ -173,9 +202,8 @@ another target, whoever owns it, or another instance's with the same target),
 or when it would close a loop through any CNAMEs on the router. An identical
 unmarked section is still adopted. The rest of the change set goes through.
 The skipped record never reaches the router, so ExternalDNS asks for it again
-on every run and the warning repeats, but nothing is committed and dnsmasq is
-not restarted for it. Remove the section in the way, or change the endpoint, to
-end it.
+on every run and the warning repeats, but nothing is applied for it. Remove
+the section in the way, or change the endpoint, to end it.
 
 An A record is still written next to a section for the same name with another
 address that carries no marker or another ID. The provider cannot see that
@@ -199,42 +227,6 @@ uci commit dhcp
 ```
 
 Then start ExternalDNS with the new ID.
-
-## Reload strategy
-
-Set with `PROVIDER_OPENWRT_RELOADSTRATEGY`:
-
-| Value | Behaviour |
-| ----- | --------- |
-| `restart` (default) | Runs `/etc/init.d/dnsmasq restart` over the `rpc/sys` endpoint. The only strategy that applies **both** record types. |
-| `uci-apply` | Calls `uci apply` with no arguments. Commits and applies **every** pending UCI config, not just `dhcp`, so anything an admin left staged is applied too. Use when the RPC user cannot reach `rpc/sys`. |
-| `none` | Commit only. Records land in `/etc/config/dhcp` but dnsmasq keeps serving the previous set. |
-
-### Why a restart, and not a reload
-
-The two record types land in different places, and only one of them survives a reload:
-
-| Record | Written to | Picked up by |
-| ------ | ---------- | ------------ |
-| `A` | hostfile `/tmp/hosts/dhcp.*` | `SIGHUP` re-reads hostfiles |
-| `CNAME` | `--cname=` in `/var/etc/dnsmasq.conf.*` | only a restart — dnsmasq reads its config file once, at startup |
-
-On top of that, a reload was measured doing nothing at all on OpenWrt 25: dnsmasq
-runs inside **ujail**, `reload_service()` is
-`rc_procd start_service; procd_send_signal dnsmasq`, and the signal reaches the
-jail wrapper rather than the daemon. The regenerated hostfile contained the new
-record while the running dnsmasq — started days earlier — kept answering
-`NXDOMAIN` for it.
-
-A restart costs roughly a second of DNS/DHCP downtime, runs only when records
-actually changed, and DHCP leases survive in `/tmp/dhcp.leases`.
-
-> **Never call LuCI's `uci apply` with a config name.** Its JSON-RPC binding is
-> `function apply(config) return uci:apply(config) end`, but the underlying
-> signature is `apply(self, rollback)` — any non-empty argument is read as
-> `rollback = true`, which starts a ubus apply with a ≥90 s rollback timer that
-> **reverts the change** unless it is confirmed out of band. This fork always
-> calls it with an empty argument list.
 
 ## Configuration Options
 
@@ -271,7 +263,7 @@ socket serving both.
 Set `ROUTER_ADDRESS=0.0.0.0` to run the webhook outside the ExternalDNS pod.
 Nothing in it is safe to expose beyond a trusted network.
 
-`/healthz` answers for the process, not for the router: an unreachable LuCI is
+`/healthz` answers for the process, not for the router: an unreachable router is
 reported as a 500 on `/records` and as `http_requests_total{status="500"}`.
 Failing the probe instead would restart a pod that is working correctly and
 would not bring the router back.
@@ -281,8 +273,8 @@ Past the negotiation at startup, ExternalDNS sends each request once. It logs a
 another status, a refused connection, or a request still unanswered after
 `--webhook-provider-read-timeout` plus `--webhook-provider-write-timeout` (5 s
 and 10 s by default) — makes it exit, and its container restarts. One call to
-LuCI may take `PROVIDER_OPENWRT_LUCIRPC_TIMEOUT`, 15 s by default, and a change
-set makes several per record, so a slow router or a large first sync can end
+the router may take `PROVIDER_OPENWRT_LUCIRPC_TIMEOUT`, 15 s by default, and a
+change set makes one per record, so a slow router or a large first sync can end
 that way rather than in a 500: raise `--webhook-provider-write-timeout` if it
 does, as the example values do, to 60 s. A change set ExternalDNS gave up on
 is still applied to the end, and the one the restarted ExternalDNS sends waits
@@ -290,11 +282,10 @@ for it rather than writing the same records a second time.
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
-| `PROVIDER_OPENWRT_LUCIRPC_HOSTNAME` | `192.168.1.1` | Router address |
-| `PROVIDER_OPENWRT_LUCIRPC_PORT` | `443` | LuCI port |
+| `PROVIDER_OPENWRT_LUCIRPC_HOSTNAME` | — | Router address, required |
+| `PROVIDER_OPENWRT_LUCIRPC_PORT` | `443` | uhttpd port |
 | `PROVIDER_OPENWRT_LUCIRPC_SSL` | `true` | Use HTTPS |
-| `PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME` / `_PASSWORD` | — | LuCI credentials |
-| `PROVIDER_OPENWRT_RELOADSTRATEGY` | `restart` | See [Reload strategy](#reload-strategy) |
+| `PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME` / `_PASSWORD` | — | `root` or an rpcd login, see [Router requirements](#router-requirements) |
 | `PROVIDER_OPENWRT_OWNERSHIPID` | *(empty)* | See [Ownership](#ownership--required-before-policy-sync) |
 | `ROUTER_ADDRESS` | `127.0.0.1` | Address the provider API binds to |
 | `ROUTER_PORT` | `8888` | Port the provider API listens on |
@@ -324,7 +315,7 @@ scrape it through
 | ------ | ---- | ----------------- |
 | `external_dns_openwrt_build_info{version,goversion}` | gauge | Always 1. `version` comes from the build info ko stamps in. |
 | `external_dns_openwrt_http_requests_total{route,status}` | counter | Provider API traffic. A climbing 500 count is the first sign the router is unreachable. ExternalDNS tries a 500–510 again on its next run and exits on any other failure, see [Two listeners](#two-listeners). |
-| `external_dns_openwrt_http_request_duration_seconds_total{route}` | counter | Seconds spent serving each route; divide by the request count for the mean. A LuCI call on a busy router is the slow part. |
+| `external_dns_openwrt_http_request_duration_seconds_total{route}` | counter | Seconds spent serving each route; divide by the request count for the mean. A call to a busy router is the slow part. |
 | `external_dns_openwrt_records` | gauge | Records the router reported on the last `Records` call — with ownership on, the ones carrying the marker. |
 | `external_dns_openwrt_planned_endpoints_total{action}` | counter | Endpoints ExternalDNS asked for, by `create`/`update`/`delete`. Flat lines are a quiet cluster; a steady climb is a plan that never converges. |
 | `external_dns_openwrt_apply_changes_total{result}` | counter | Change sets applied, `success` or `error`. |

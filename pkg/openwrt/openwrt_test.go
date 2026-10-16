@@ -5,50 +5,88 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/VizzleTF/external-dns-openwrt-next/pkg/ubus"
 )
 
-const testOwner = "homelab"
+const (
+	testOwner = "homelab"
+	// The marker as a written section carries it.
+	stamp = ownershipOption + "=" + testOwner
+)
 
-// fakeRPC answers `uci get_all dhcp` with a fixed router state and every other
-// call with success, and records each call as one line, e.g.
-// "uci set dhcp cfg01 name foo.bar.com".
+// fakeRPC answers `uci get dhcp` with a fixed router state, `uci add` with
+// section cfg01 and every other call with success, and records each call as
+// one line, its values sorted, e.g. "uci set dhcp cfg01 external_dns=homelab".
 type fakeRPC struct {
 	sections map[string]map[string]any
 	// fail makes the call spelled exactly like this return an error.
-	fail  map[string]error
-	calls []string
+	fail map[string]error
+	// noSection makes `uci add` answer without a section name.
+	noSection bool
+	calls     []string
+	resets    int
 }
 
-func (f *fakeRPC) call(kind, method string, params []string) (string, error) {
-	call := strings.Join(append([]string{kind, method}, params...), " ")
+func (f *fakeRPC) Call(_ context.Context, object, method string, args, result any) error {
+	payload, err := json.Marshal(args)
+	if err != nil {
+		return err
+	}
+	var a struct {
+		Config, Type, Section string
+		Values                map[string]string
+		Rollback              *bool
+	}
+	if err := json.Unmarshal(payload, &a); err != nil {
+		return err
+	}
+
+	words := []string{object, method}
+	for _, word := range []string{a.Config, a.Type, a.Section} {
+		if word != "" {
+			words = append(words, word)
+		}
+	}
+	for _, key := range slices.Sorted(maps.Keys(a.Values)) {
+		words = append(words, key+"="+a.Values[key])
+	}
+	if a.Rollback != nil {
+		words = append(words, fmt.Sprintf("rollback=%t", *a.Rollback))
+	}
+	call := strings.Join(words, " ")
 	f.calls = append(f.calls, call)
 	if err := f.fail[call]; err != nil {
-		return "", err
+		return err
 	}
 
+	var data any
 	switch method {
-	case "get_all":
-		payload, err := json.Marshal(f.sections)
-		return string(payload), err
+	case "get":
+		data = map[string]any{"values": f.sections}
 	case "add":
-		return "cfg01", nil
+		if !f.noSection {
+			data = map[string]string{"section": "cfg01"}
+		}
 	}
-	return "", nil
+	if data == nil || result == nil {
+		return nil
+	}
+	if payload, err = json.Marshal(data); err != nil {
+		return err
+	}
+	return json.Unmarshal(payload, result)
 }
 
-func (f *fakeRPC) Uci(_ context.Context, method string, params []string) (string, error) {
-	return f.call("uci", method, params)
-}
+func (f *fakeRPC) Reset() { f.resets++ }
 
-func (f *fakeRPC) Sys(_ context.Context, method string, params []string) (string, error) {
-	return f.call("sys", method, params)
-}
-
-// section builds the raw shape `uci get_all dhcp` returns for one section.
+// section builds the raw shape `uci get dhcp` returns for one section.
 // An empty owner means the section carries no ownership marker.
 func section(sectionType, name, value, owner string) map[string]any {
 	options := map[string]any{optionSectionType: sectionType}
@@ -102,10 +140,9 @@ func assertWarned(t *testing.T, logged *bytes.Buffer, want string) {
 // owning builds a provider scoped to its own records, with adoption on.
 func owning(rpc *fakeRPC) *openWRT {
 	return &openWRT{
-		lucirpc:        rpc,
-		log:            slog.New(slog.DiscardHandler),
-		reloadStrategy: ReloadStrategyRestart,
-		ownershipID:    testOwner,
+		ubus:        rpc,
+		log:         slog.New(slog.DiscardHandler),
+		ownershipID: testOwner,
 	}
 }
 
@@ -117,9 +154,8 @@ func unscoped(rpc *fakeRPC) *openWRT {
 }
 
 const (
-	getAll  = "uci get_all dhcp"
-	commit  = "uci commit dhcp"
-	restart = "sys call " + dnsmasqRestartCommand
+	getAll = "uci get dhcp"
+	apply  = "uci apply rollback=false"
 )
 
 func assertCalls(t *testing.T, rpc *fakeRPC, want ...string) {
@@ -216,7 +252,6 @@ func TestReadingRecords(t *testing.T) {
 
 func TestAdding(t *testing.T) {
 	ctx := context.Background()
-	stamp := "uci set dhcp cfg01 " + ownershipOption + " " + testOwner
 
 	for _, tc := range []struct {
 		name     string
@@ -229,22 +264,19 @@ func TestAdding(t *testing.T) {
 			name:     "stamps the marker on a record it creates",
 			provider: owning,
 			add:      aRecord("foo.bar.com", "1.1.1.1"),
-			want: []string{getAll, "uci add dhcp domain",
-				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", stamp, commit, restart},
+			want:     []string{getAll, "uci add dhcp domain " + stamp + " ip=1.1.1.1 name=foo.bar.com", apply},
 		},
 		{
 			name:     "writes no marker when ownership is disabled",
 			provider: unscoped,
 			add:      aRecord("foo.bar.com", "1.1.1.1"),
-			want: []string{getAll, "uci add dhcp domain",
-				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", commit, restart},
+			want:     []string{getAll, "uci add dhcp domain ip=1.1.1.1 name=foo.bar.com", apply},
 		},
 		{
 			name:     "writes a CNAME section",
 			provider: unscoped,
 			add:      DNSRecord{Type: RecordTypeCNAME, Name: "Alias.bar.com", Value: "Target.bar.com."},
-			want: []string{getAll, "uci add dhcp cname",
-				"uci set dhcp cfg01 cname alias.bar.com", "uci set dhcp cfg01 target target.bar.com", commit, restart},
+			want:     []string{getAll, "uci add dhcp cname cname=alias.bar.com target=target.bar.com", apply},
 		},
 		{
 			// The migration path: records already on the router get stamped on
@@ -253,7 +285,7 @@ func TestAdding(t *testing.T) {
 			sections: map[string]map[string]any{"existing": domainSection("foo.bar.com", "1.1.1.1", "")},
 			provider: owning,
 			add:      aRecord("foo.bar.com", "1.1.1.1"),
-			want:     []string{getAll, "uci set dhcp existing " + ownershipOption + " " + testOwner, commit, restart},
+			want:     []string{getAll, "uci set dhcp existing " + stamp, apply},
 		},
 		{
 			// ExternalDNS compares names canonically, dnsmasq answers them
@@ -264,22 +296,20 @@ func TestAdding(t *testing.T) {
 			sections: map[string]map[string]any{"existing": domainSection("FOO.bar.com.", "1.1.1.1", "")},
 			provider: owning,
 			add:      aRecord("foo.bar.com", "1.1.1.1"),
-			want:     []string{getAll, "uci set dhcp existing " + ownershipOption + " " + testOwner, commit, restart},
+			want:     []string{getAll, "uci set dhcp existing " + stamp, apply},
 		},
 		{
 			name:     "writes the canonical spelling of a name",
 			provider: unscoped,
 			add:      aRecord("FOO.Bar.com.", "1.1.1.1"),
-			want: []string{getAll, "uci add dhcp domain",
-				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", commit, restart},
+			want:     []string{getAll, "uci add dhcp domain ip=1.1.1.1 name=foo.bar.com", apply},
 		},
 		{
 			name:     "never adopts a section owned by another instance",
 			sections: map[string]map[string]any{"theirs": domainSection("foo.bar.com", "1.1.1.1", "other-instance")},
 			provider: owning,
 			add:      aRecord("foo.bar.com", "1.1.1.1"),
-			want: []string{getAll, "uci add dhcp domain",
-				"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 1.1.1.1", stamp, commit, restart},
+			want:     []string{getAll, "uci add dhcp domain " + stamp + " ip=1.1.1.1 name=foo.bar.com", apply},
 		},
 		{
 			name:     "is a no-op when the record is already owned and present",
@@ -312,10 +342,8 @@ func TestAdding(t *testing.T) {
 // keeps dnsmasq from starting.
 func TestNeverWritingACNAMEThatStopsDnsmasq(t *testing.T) {
 	const taken, loops = "its alias already has one", "would close a CNAME loop"
-	stamp := "uci set dhcp cfg01 " + ownershipOption + " " + testOwner
 	writes := func(alias, target string) []string {
-		return []string{"uci add dhcp cname",
-			"uci set dhcp cfg01 cname " + alias, "uci set dhcp cfg01 target " + target, stamp}
+		return []string{"uci add dhcp cname cname=" + alias + " " + stamp + " target=" + target}
 	}
 
 	for _, tc := range []struct {
@@ -331,7 +359,7 @@ func TestNeverWritingACNAMEThatStopsDnsmasq(t *testing.T) {
 			// with different set identifiers.
 			name: "writes one of two CNAMEs for the same alias in a change set",
 			add:  []DNSRecord{cnameRecord("a.lan", "t1.lan"), cnameRecord("A.lan.", "t2.lan")},
-			want: slices.Concat([]string{getAll}, writes("a.lan", "t1.lan"), []string{commit, restart}),
+			want: slices.Concat([]string{getAll}, writes("a.lan", "t1.lan"), []string{apply}),
 			// The second one is skipped.
 			warning: taken,
 		},
@@ -362,7 +390,7 @@ func TestNeverWritingACNAMEThatStopsDnsmasq(t *testing.T) {
 			name:     "still adopts an identical unowned CNAME",
 			sections: map[string]map[string]any{"existing": cnameSection("a.lan", "T1.lan.", "")},
 			add:      []DNSRecord{cnameRecord("a.lan", "t1.lan")},
-			want:     []string{getAll, "uci set dhcp existing " + ownershipOption + " " + testOwner, commit, restart},
+			want:     []string{getAll, "uci set dhcp existing " + stamp, apply},
 		},
 		{
 			// Removals run first, so the section being replaced is out of the
@@ -371,7 +399,7 @@ func TestNeverWritingACNAMEThatStopsDnsmasq(t *testing.T) {
 			sections: map[string]map[string]any{"mine": cnameSection("a.lan", "t1.lan", testOwner)},
 			remove:   []DNSRecord{cnameRecord("a.lan", "t1.lan")},
 			add:      []DNSRecord{cnameRecord("a.lan", "t2.lan")},
-			want:     slices.Concat([]string{getAll, "uci delete dhcp mine"}, writes("a.lan", "t2.lan"), []string{commit, restart}),
+			want:     slices.Concat([]string{getAll, "uci delete dhcp mine"}, writes("a.lan", "t2.lan"), []string{apply}),
 		},
 		{
 			name:    "skips a CNAME onto itself",
@@ -392,7 +420,7 @@ func TestNeverWritingACNAMEThatStopsDnsmasq(t *testing.T) {
 		{
 			name:    "skips the second of two CNAMEs in a change set that would loop",
 			add:     []DNSRecord{cnameRecord("a.lan", "b.lan"), cnameRecord("b.lan", "a.lan")},
-			want:    slices.Concat([]string{getAll}, writes("a.lan", "b.lan"), []string{commit, restart}),
+			want:    slices.Concat([]string{getAll}, writes("a.lan", "b.lan"), []string{apply}),
 			warning: loops,
 		},
 		{
@@ -402,7 +430,7 @@ func TestNeverWritingACNAMEThatStopsDnsmasq(t *testing.T) {
 				"two": cnameSection("d.lan", "c.lan", ""),
 			},
 			add:  []DNSRecord{cnameRecord("a.lan", "b.lan")},
-			want: slices.Concat([]string{getAll}, writes("a.lan", "b.lan"), []string{commit, restart}),
+			want: slices.Concat([]string{getAll}, writes("a.lan", "b.lan"), []string{apply}),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -448,11 +476,11 @@ func TestAddingNextToAnAddressItDoesNotOwn(t *testing.T) {
 			if err := o.ApplyDNSRecords(context.Background(), nil, []DNSRecord{aRecord("nas.lan", "10.0.0.6")}); err != nil {
 				t.Fatal(err)
 			}
-			want := []string{getAll, "uci add dhcp domain", "uci set dhcp cfg01 name nas.lan", "uci set dhcp cfg01 ip 10.0.0.6"}
+			add := "uci add dhcp domain ip=10.0.0.6 name=nas.lan"
 			if o.ownershipEnabled() {
-				want = append(want, "uci set dhcp cfg01 "+ownershipOption+" "+testOwner)
+				add = "uci add dhcp domain " + stamp + " ip=10.0.0.6 name=nas.lan"
 			}
-			assertCalls(t, rpc, append(want, commit, restart)...)
+			assertCalls(t, rpc, getAll, add, apply)
 			assertWarned(t, logged, tc.warning)
 		})
 	}
@@ -518,7 +546,7 @@ func TestDeleting(t *testing.T) {
 			name:     "deletes a record it owns",
 			sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)},
 			remove:   []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")},
-			want:     []string{getAll, "uci delete dhcp mine", commit, restart},
+			want:     []string{getAll, "uci delete dhcp mine", apply},
 		},
 		{
 			// A name whose case or trailing dot changed between what was
@@ -527,12 +555,12 @@ func TestDeleting(t *testing.T) {
 			name:     "deletes a record the change set spells differently",
 			sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)},
 			remove:   []DNSRecord{aRecord("Foo.BAR.com.", "1.1.1.1")},
-			want:     []string{getAll, "uci delete dhcp mine", commit, restart},
+			want:     []string{getAll, "uci delete dhcp mine", apply},
 		},
 		{
 			// The whole point of ownership: policy=sync must not be able to
 			// remove entries nobody handed to ExternalDNS. No delete, no
-			// commit, no reload.
+			// apply.
 			name:     "refuses to delete a manually created record",
 			sections: map[string]map[string]any{"manual": domainSection("s3.vaka.work", "10.11.12.237", "")},
 			remove:   []DNSRecord{aRecord("s3.vaka.work", "10.11.12.237")},
@@ -561,7 +589,7 @@ func TestDeleting(t *testing.T) {
 				aRecord("two.bar.com", "2.2.2.2"),
 				aRecord("three.bar.com", "3.3.3.3"),
 			},
-			want: []string{getAll, "uci delete dhcp a", "uci delete dhcp b", "uci delete dhcp c", commit, restart},
+			want: []string{getAll, "uci delete dhcp a", "uci delete dhcp b", "uci delete dhcp c", apply},
 		},
 		{
 			name: "deletes only the target it was asked for on a multi-target name",
@@ -570,7 +598,7 @@ func TestDeleting(t *testing.T) {
 				"drop": domainSection("multi.bar.com", "2.2.2.2", testOwner),
 			},
 			remove: []DNSRecord{aRecord("multi.bar.com", "2.2.2.2")},
-			want:   []string{getAll, "uci delete dhcp drop", commit, restart},
+			want:   []string{getAll, "uci delete dhcp drop", apply},
 		},
 		{
 			// Validation guards writes only: a section written before it existed
@@ -580,7 +608,7 @@ func TestDeleting(t *testing.T) {
 				"poisoned": section(sectionTypeCName, "foo.bar.com", "x.lan\naddress=/bank.com/6.6.6.6", testOwner),
 			},
 			remove: []DNSRecord{{Type: RecordTypeCNAME, Name: "foo.bar.com", Value: "x.lan\naddress=/bank.com/6.6.6.6"}},
-			want:   []string{getAll, "uci delete dhcp poisoned", commit, restart},
+			want:   []string{getAll, "uci delete dhcp poisoned", apply},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -623,11 +651,10 @@ func TestLeavingAnIPv6DomainSectionAlone(t *testing.T) {
 	if err := o.ApplyDNSRecords(ctx, []DNSRecord{aRecord("nas.lan", "fd00::5")}, []DNSRecord{aRecord("nas.lan", "10.0.0.5")}); err != nil {
 		t.Fatal(err)
 	}
-	assertCalls(t, rpc, getAll, getAll, "uci add dhcp domain",
-		"uci set dhcp cfg01 name nas.lan", "uci set dhcp cfg01 ip 10.0.0.5", commit, restart)
+	assertCalls(t, rpc, getAll, getAll, "uci add dhcp domain ip=10.0.0.5 name=nas.lan", apply)
 }
 
-func TestUpdatingRemovesAndAddsInASingleCommit(t *testing.T) {
+func TestUpdatingRemovesAndAddsInASingleApply(t *testing.T) {
 	rpc := &fakeRPC{sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)}}
 
 	err := owning(rpc).ApplyDNSRecords(context.Background(),
@@ -636,9 +663,7 @@ func TestUpdatingRemovesAndAddsInASingleCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCalls(t, rpc, getAll, "uci delete dhcp mine", "uci add dhcp domain",
-		"uci set dhcp cfg01 name foo.bar.com", "uci set dhcp cfg01 ip 9.9.9.9",
-		"uci set dhcp cfg01 "+ownershipOption+" "+testOwner, commit, restart)
+	assertCalls(t, rpc, getAll, "uci delete dhcp mine", "uci add dhcp domain "+stamp+" ip=9.9.9.9 name=foo.bar.com", apply)
 }
 
 // Two sections for one record are reported as a duplicate target, and the
@@ -657,42 +682,79 @@ func TestUpdatingAwayADuplicateSection(t *testing.T) {
 	if len(rpc.calls) >= 3 {
 		slices.Sort(rpc.calls[1:3])
 	}
-	assertCalls(t, rpc, getAll, "uci delete dhcp one", "uci delete dhcp two", "uci add dhcp domain",
-		"uci set dhcp cfg01 name dup.bar.com", "uci set dhcp cfg01 ip 1.1.1.1",
-		"uci set dhcp cfg01 "+ownershipOption+" "+testOwner, commit, restart)
+	assertCalls(t, rpc, getAll, "uci delete dhcp one", "uci delete dhcp two", "uci add dhcp domain "+stamp+" ip=1.1.1.1 name=dup.bar.com", apply)
 }
 
-func TestReloadStrategies(t *testing.T) {
-	for _, tc := range []struct {
-		strategy string
-		want     []string
-	}{
-		{ReloadStrategyNone, nil},
-		{ReloadStrategyRestart, []string{restart}},
-		// A config name here would be read as rollback=true and the change
-		// would revert itself after ~90s, so uci apply takes NO arguments.
-		{ReloadStrategyUciApply, []string{"uci apply"}},
-	} {
-		t.Run(tc.strategy, func(t *testing.T) {
-			rpc := &fakeRPC{sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)}}
-			o := owning(rpc)
-			o.reloadStrategy = tc.strategy
+// Whatever the session staged before a failure must not be applied by the
+// next change set, which runs in the same session.
+func TestAFailureDropsTheSession(t *testing.T) {
+	mine := map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)}
+	remove := []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}
 
-			if err := o.ApplyDNSRecords(context.Background(), []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil); err != nil {
-				t.Fatal(err)
+	for _, tc := range []struct {
+		name string
+		rpc  *fakeRPC
+		add  []DNSRecord
+		want []string
+	}{
+		{
+			name: "a write fails",
+			rpc:  &fakeRPC{sections: mine, fail: map[string]error{"uci delete dhcp mine": ubus.ErrNotFound}},
+			want: []string{getAll, "uci delete dhcp mine"},
+		},
+		{
+			name: "a record is refused after another was staged",
+			rpc:  &fakeRPC{sections: mine},
+			add:  []DNSRecord{aRecord("foo.bar.com", "")},
+			want: []string{getAll, "uci delete dhcp mine"},
+		},
+		{
+			name: "uci add names no section",
+			rpc:  &fakeRPC{sections: mine, noSection: true},
+			add:  []DNSRecord{aRecord("new.bar.com", "2.2.2.2")},
+			want: []string{getAll, "uci delete dhcp mine", "uci add dhcp domain " + stamp + " ip=2.2.2.2 name=new.bar.com"},
+		},
+		{
+			name: "the apply fails",
+			rpc:  &fakeRPC{sections: mine, fail: map[string]error{apply: errors.New("timeout")}},
+			want: []string{getAll, "uci delete dhcp mine", apply},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := owning(tc.rpc).ApplyDNSRecords(context.Background(), remove, tc.add); err == nil {
+				t.Fatal("got no error")
 			}
-			assertCalls(t, rpc, append([]string{getAll, "uci delete dhcp mine", commit}, tc.want...)...)
+			assertCalls(t, tc.rpc, tc.want...)
+			if tc.rpc.resets != 1 {
+				t.Errorf("resets: got %d, want 1", tc.rpc.resets)
+			}
 		})
 	}
+}
 
-	t.Run("reports a failed reload", func(t *testing.T) {
-		rpc := &fakeRPC{
-			sections: map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)},
-			fail:     map[string]error{restart: errors.New("no acl")},
+func TestApplying(t *testing.T) {
+	mine := map[string]map[string]any{"mine": domainSection("foo.bar.com", "1.1.1.1", testOwner)}
+	remove := []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}
+
+	t.Run("keeps the session after a success", func(t *testing.T) {
+		rpc := &fakeRPC{sections: mine}
+		if err := owning(rpc).ApplyDNSRecords(context.Background(), remove, nil); err != nil {
+			t.Fatal(err)
 		}
-		err := owning(rpc).ApplyDNSRecords(context.Background(), []DNSRecord{aRecord("foo.bar.com", "1.1.1.1")}, nil)
-		if err == nil || !strings.Contains(err.Error(), "restart dnsmasq") {
-			t.Errorf("got %v", err)
+		assertCalls(t, rpc, getAll, "uci delete dhcp mine", apply)
+		if rpc.resets != 0 {
+			t.Errorf("resets: got %d, want 0", rpc.resets)
+		}
+	})
+
+	// What uci apply answers when the session staged nothing.
+	t.Run("takes nothing to apply for success", func(t *testing.T) {
+		rpc := &fakeRPC{sections: mine, fail: map[string]error{apply: fmt.Errorf("ubus call uci apply: %w", ubus.ErrNoData)}}
+		if err := owning(rpc).ApplyDNSRecords(context.Background(), remove, nil); err != nil {
+			t.Fatal(err)
+		}
+		if rpc.resets != 0 {
+			t.Errorf("resets: got %d, want 0", rpc.resets)
 		}
 	})
 }
@@ -705,21 +767,17 @@ func TestNothingToDoDoesNotEvenReadTheRouter(t *testing.T) {
 	assertCalls(t, rpc)
 }
 
-func TestConfig(t *testing.T) {
-	for _, strategy := range []string{ReloadStrategyRestart, ReloadStrategyUciApply, ReloadStrategyNone} {
-		if err := validateReloadStrategy(strategy); err != nil {
-			t.Errorf("%s: %v", strategy, err)
-		}
+func TestNew(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.OwnershipID != "" {
+		t.Errorf("defaults: got %+v", cfg)
 	}
-	// "reload" and its old name "dnsmasq" are gone: neither applied CNAMEs.
-	for _, strategy := range []string{"reload", "dnsmasq", "nope"} {
-		if validateReloadStrategy(strategy) == nil {
-			t.Errorf("%s: accepted", strategy)
-		}
+	if _, err := New(cfg, slog.New(slog.DiscardHandler)); err == nil || !strings.Contains(err.Error(), "PROVIDER_OPENWRT_LUCIRPC_HOSTNAME") {
+		t.Errorf("no hostname: got %v", err)
 	}
 
-	cfg := DefaultConfig()
-	if cfg.OwnershipID != "" || cfg.ReloadStrategy != ReloadStrategyRestart {
-		t.Errorf("defaults: got %+v", cfg)
+	cfg.Ubus.Hostname = "192.168.1.1"
+	if _, err := New(cfg, slog.New(slog.DiscardHandler)); err != nil {
+		t.Error(err)
 	}
 }
