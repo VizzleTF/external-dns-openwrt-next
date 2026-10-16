@@ -474,3 +474,11 @@ func TestSecretsStayOutOfErrorsAndLogs(t *testing.T) {
 		t.Errorf("logs carry a secret, or nothing was logged:\n%s", out)
 	}
 }
+
+func TestNewBracketsAnIPv6Address(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Hostname = "fd00::1"
+	if got := New(cfg, slog.New(slog.DiscardHandler)).(*client).url; got != "https://[fd00::1]:443/ubus" {
+		t.Errorf("url = %s", got)
+	}
+}
