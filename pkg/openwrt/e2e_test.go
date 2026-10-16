@@ -171,3 +171,46 @@ func TestE2EApplyingRecords(t *testing.T) {
 		})
 	}
 }
+
+// interleaved runs before ahead of the first uci apply.
+type interleaved struct {
+	ubus.Client
+	before func()
+}
+
+func (i *interleaved) Call(ctx context.Context, object, method string, args, result any) error {
+	if method == "apply" && i.before != nil {
+		i.before()
+		i.before = nil
+	}
+	return i.Client.Call(ctx, object, method, args, result)
+}
+
+// rpcd would name both sections alike, and the later apply would overwrite
+// the section the other session committed.
+func TestE2EConcurrentAddsKeepBothSections(t *testing.T) {
+	ctx := context.Background()
+	const prefix = "e2e-concurrent-"
+	t.Cleanup(func() {
+		if leftover := committed(t, prefix); len(leftover) > 0 {
+			_ = e2eRoot(t).ApplyDNSRecords(ctx, leftover, nil)
+		}
+	})
+
+	theirs := DNSRecord{Type: RecordTypeA, Name: prefix + "theirs.lan", Value: "10.9.7.1", Owner: e2eOwner}
+	mine := DNSRecord{Type: RecordTypeA, Name: prefix + "mine.lan", Value: "10.9.7.2", Owner: e2eOwner}
+
+	o := e2eProvider(t, os.Getenv("OPENWRT_E2E_USERNAME"), os.Getenv("OPENWRT_E2E_PASSWORD")).(*openWRT)
+	o.ubus = &interleaved{Client: o.ubus, before: func() {
+		if err := e2eRoot(t).ApplyDNSRecords(ctx, nil, []DNSRecord{theirs}); err != nil {
+			t.Error(err)
+		}
+	}}
+	if err := o.ApplyDNSRecords(ctx, nil, []DNSRecord{mine}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, want := committed(t, prefix), sorted([]DNSRecord{theirs, mine}); !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}

@@ -212,6 +212,66 @@ func TestCallReportsAccessDeniedAfterOneMoreLogin(t *testing.T) {
 	}
 }
 
+// A fresh session would not see what the refused one staged, and applying
+// in it would commit the rest of the change set alone.
+func TestCallDoesNotLogInAgainOverStagedChanges(t *testing.T) {
+	handler, calls := sessions(t, func(call ubusCall) string {
+		if call.Session == "session-1" && call.Method != "add" {
+			return accessDenied
+		}
+		return `"result":[0,{"section":"cfg01"}]`
+	})
+	client := newTestClient(t, handler, discard)
+	ctx := context.Background()
+
+	if err := client.Call(ctx, "uci", "add", map[string]string{"config": "dhcp"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, method := range []string{"set", "apply"} {
+		err := client.Call(ctx, "uci", method, nil, nil)
+		if want := "ubus call uci " + method + ": session refused with uci changes staged: json-rpc error -32002: Access denied"; err == nil || err.Error() != want {
+			t.Errorf("got %v, want %q", err, want)
+		}
+	}
+	if n := logins(*calls); n != 1 {
+		t.Errorf("logins before Reset: got %d, want 1", n)
+	}
+
+	client.Reset()
+	if err := client.Call(ctx, "uci", "get", map[string]string{"config": "dhcp"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := logins(*calls); n != 2 {
+		t.Errorf("logins after Reset: got %d, want 2", n)
+	}
+}
+
+// Once applied, nothing is lost by logging in again.
+func TestCallLogsInAgainAfterAnApply(t *testing.T) {
+	refuse := false
+	handler, calls := sessions(t, func(call ubusCall) string {
+		if refuse && call.Session == "session-1" {
+			return accessDenied
+		}
+		return `"result":[0]`
+	})
+	client := newTestClient(t, handler, discard)
+	ctx := context.Background()
+
+	for _, method := range []string{"delete", "apply"} {
+		if err := client.Call(ctx, "uci", method, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refuse = true
+	if err := client.Call(ctx, "uci", "get", map[string]string{"config": "dhcp"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if n := logins(*calls); n != 2 {
+		t.Errorf("logins: got %d, want 2", n)
+	}
+}
+
 func TestCallReportsAnotherJSONRPCErrorWithoutLoggingInAgain(t *testing.T) {
 	handler, calls := sessions(t, func(ubusCall) string {
 		return `"error":{"code":-32601,"message":"Method not found"}`
