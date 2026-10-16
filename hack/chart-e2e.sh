@@ -115,11 +115,28 @@ EOF
 
 wait_state a.nas.e2e.lan Ready
 wait_state cname.git.e2e.lan Ready
+# A wildcard's object has a hashed name, so it is found by its DNS name.
+wildcard_state() { kubectl -n "$namespace" get owr -o jsonpath='{.items[?(@.spec.dnsName=="*.e2e.lan")].status.state}'; }
 for _ in $(seq 30); do
-	[[ $(kubectl -n "$namespace" get owr -o jsonpath='{.items[?(@.spec.dnsName=="*.e2e.lan")].status.state}') == Rejected ]] && break
+	[[ $(wildcard_state) == Rejected ]] && break
 	sleep 2
 done
+if [[ $(wildcard_state) != Rejected ]]; then
+	echo "*.e2e.lan is not Rejected" >&2
+	kubectl -n "$namespace" get owr >&2 || true
+	exit 1
+fi
 kubectl -n "$namespace" get owr
+# The webhook is a native sidecar, up before ExternalDNS, which exits when it
+# finds no webhook at startup.
+restarts=$(kubectl -n "$namespace" get pod -l "app.kubernetes.io/instance=$release" \
+	-o jsonpath='{.items[0].status.containerStatuses[?(@.name=="external-dns")].restartCount}')
+if [[ $restarts != 0 ]]; then
+	echo "external-dns restarted $restarts times" >&2
+	exit 1
+fi
+kubectl -n "$namespace" get endpointslices -l "kubernetes.io/service-name=$release-external-dns-openwrt" \
+	-o jsonpath='{.items[0].ports[*].port}' | tr ' ' '\n' | grep -qx 8080
 docker exec "$router" uci show dhcp | grep -q "name='nas.e2e.lan'"
 docker exec "$router" uci show dhcp | grep -q "cname='git.e2e.lan'"
 

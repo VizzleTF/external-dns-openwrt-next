@@ -73,7 +73,13 @@ externalDNS:
   # `--enable-legacy-annotation-prefix` to also read the
   # `external-dns.alpha.kubernetes.io/` annotations used before v0.22.0.
   extraArgs: []
-  resources: {}
+  # -- Requests only: no CPU limit, which would only throttle, and no memory
+  # limit, since ExternalDNS caches every object of its sources and grows
+  # with the cluster.
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
 
 webhook:
   image:
@@ -87,7 +93,12 @@ webhook:
   logEncoding: json
   # -- More environment variables for the webhook container.
   extraEnv: []
-  resources: {}
+  # -- Requests only, as for ExternalDNS. The webhook holds one snapshot of
+  # the records and nothing else.
+  resources:
+    requests:
+      cpu: 5m
+      memory: 16Mi
 
 serviceAccount:
   create: true
