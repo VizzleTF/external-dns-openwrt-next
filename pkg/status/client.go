@@ -3,8 +3,10 @@ package status
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -29,6 +32,9 @@ const (
 	// finds nothing else.
 	managedByLabel = "app.kubernetes.io/managed-by"
 	managedBy      = "external-dns-openwrt"
+	// ownerLabel holds the ownership ID of the instance that wrote an object,
+	// so that two instances in one namespace never delete each other's.
+	ownerLabel = group + "/owner"
 
 	serviceAccountDir = "/var/run/secrets/kubernetes.io/serviceaccount"
 )
@@ -38,13 +44,14 @@ const (
 type Client struct {
 	base      string
 	namespace string
+	owner     string
 	tokenFile string
 	http      *http.Client
 }
 
 // InCluster builds a client from the pod's service account. namespace may be
-// empty for the pod's own.
-func InCluster(namespace string) (*Client, error) {
+// empty for the pod's own; ownershipID is the provider's.
+func InCluster(namespace, ownershipID string) (*Client, error) {
 	host, port := os.Getenv("KUBERNETES_SERVICE_HOST"), os.Getenv("KUBERNETES_SERVICE_PORT")
 	if host == "" || port == "" {
 		return nil, errors.New("not running in a cluster: KUBERNETES_SERVICE_HOST and KUBERNETES_SERVICE_PORT are not set")
@@ -58,12 +65,12 @@ func InCluster(namespace string) (*Client, error) {
 		namespace = strings.TrimSpace(string(raw))
 	}
 
-	return New("https://"+net.JoinHostPort(host, port), serviceAccountDir+"/ca.crt", serviceAccountDir+"/token", namespace)
+	return New("https://"+net.JoinHostPort(host, port), serviceAccountDir+"/ca.crt", serviceAccountDir+"/token", namespace, ownershipID)
 }
 
 // New builds a client for the API server at base, trusting caFile and
 // authenticating with the token in tokenFile.
-func New(base, caFile, tokenFile, namespace string) (*Client, error) {
+func New(base, caFile, tokenFile, namespace, ownershipID string) (*Client, error) {
 	pem, err := os.ReadFile(caFile)
 	if err != nil {
 		return nil, fmt.Errorf("read the cluster CA: %w", err)
@@ -76,11 +83,32 @@ func New(base, caFile, tokenFile, namespace string) (*Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 
-	return newClient(base, namespace, tokenFile, &http.Client{Transport: transport, Timeout: 10 * time.Second}), nil
+	return newClient(base, namespace, ownershipID, tokenFile, &http.Client{Transport: transport, Timeout: 10 * time.Second}), nil
 }
 
-func newClient(base, namespace, tokenFile string, httpClient *http.Client) *Client {
-	return &Client{base: strings.TrimSuffix(base, "/"), namespace: namespace, tokenFile: tokenFile, http: httpClient}
+func newClient(base, namespace, ownershipID, tokenFile string, httpClient *http.Client) *Client {
+	return &Client{base: strings.TrimSuffix(base, "/"), namespace: namespace, owner: ownerValue(ownershipID),
+		tokenFile: tokenFile, http: httpClient}
+}
+
+// labelValue is what Kubernetes accepts as a label value.
+var labelValue = regexp.MustCompile(`^[A-Za-z0-9]([-A-Za-z0-9_.]{0,61}[A-Za-z0-9])?$`)
+
+// ownerValue turns an ownership ID into a label value: "none" for ownership
+// disabled, and a hash for an ID Kubernetes would not take as a label value.
+func ownerValue(ownershipID string) string {
+	switch {
+	case ownershipID == "":
+		return "none"
+	case labelValue.MatchString(ownershipID):
+		return ownershipID
+	}
+	sum := sha256.Sum256([]byte(ownershipID))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+func (c *Client) labels() map[string]string {
+	return map[string]string{managedByLabel: managedBy, ownerLabel: c.owner}
 }
 
 // object is an OpenWrtRecord as the API server stores it.
@@ -113,7 +141,7 @@ func (c *Client) collection() string {
 func (c *Client) apply(ctx context.Context, obj *object) error {
 	obj.APIVersion, obj.Kind = apiVersion, kind
 	obj.Metadata.Namespace = c.namespace
-	obj.Metadata.Labels = map[string]string{managedByLabel: managedBy}
+	obj.Metadata.Labels = c.labels()
 
 	body, err := json.Marshal(obj)
 	if err != nil {
@@ -125,12 +153,12 @@ func (c *Client) apply(ctx context.Context, obj *object) error {
 		"application/apply-patch+yaml", body, nil)
 }
 
-// list returns every object this provider wrote.
+// list returns every object this instance wrote.
 func (c *Client) list(ctx context.Context) ([]object, error) {
 	var list struct {
 		Items []object `json:"items"`
 	}
-	query := url.Values{"labelSelector": {managedByLabel + "=" + managedBy}}
+	query := url.Values{"labelSelector": {managedByLabel + "=" + managedBy + "," + ownerLabel + "=" + c.owner}}
 	if err := c.do(ctx, http.MethodGet, c.collection()+"?"+query.Encode(), "", nil, &list); err != nil {
 		return nil, err
 	}

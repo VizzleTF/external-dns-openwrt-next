@@ -451,10 +451,16 @@ cname.git.lan        git.lan      CNAME   ["nas.lan"]    Conflict   alias alread
 | `Rejected` | Dropped in `AdjustEndpoints`, so never planned: a wildcard, a CNAME with two targets, or a name or target dnsmasq cannot take. |
 | `Orphan` | A record of this provider on the router that nothing asks for any more. `policy: sync` deletes it, `upsert-only` leaves it. |
 
-It is a mirror, not an interface: nothing reads it back, edits are overwritten
-on the next run, and the router stays the only source of truth. ExternalDNS
-sends no reference to the Ingress or Service a record came from, so the objects
-cannot point at one.
+It is a mirror, not an interface: nothing reads it back, edits and deletions
+are undone on the next run, and the router stays the only source of truth.
+ExternalDNS sends no reference to the Ingress or Service a record came from, so
+the objects cannot point at one.
+
+Each object carries the `external-dns-openwrt.vizzletf.github.io/owner` label
+with the instance's ownership ID (`none` without one), and an instance only
+ever lists and deletes its own. Object names carry no owner, so two instances
+asking for the same name would overwrite each other's object: run one instance
+per namespace, or give instances that share one disjoint domain filters.
 
 The chart installs the CRD and a Role letting its service account write the
 objects in the release namespace, and nowhere else. An API server that

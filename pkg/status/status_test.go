@@ -48,12 +48,14 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.Method == http.MethodGet && r.URL.Path == collection:
-		if got := r.URL.Query().Get("labelSelector"); got != managedByLabel+"="+managedBy {
-			f.t.Errorf("labelSelector = %q", got)
+		selector := r.URL.Query().Get("labelSelector")
+		owner, ok := strings.CutPrefix(selector, managedByLabel+"="+managedBy+","+ownerLabel+"=")
+		if !ok {
+			f.t.Errorf("labelSelector = %q", selector)
 		}
 		items := slices.Collect(func(yield func(object) bool) {
 			for _, obj := range f.objects {
-				if !yield(obj) {
+				if obj.Metadata.Labels[ownerLabel] == owner && !yield(obj) {
 					return
 				}
 			}
@@ -73,7 +75,7 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.t.Errorf("apply body: %v", err)
 		}
 		if obj.APIVersion != apiVersion || obj.Kind != kind || obj.Metadata.Name != name ||
-			obj.Metadata.Namespace != "dns" || obj.Metadata.Labels[managedByLabel] != managedBy {
+			obj.Metadata.Namespace != "dns" || obj.Metadata.Labels[managedByLabel] != managedBy || obj.Metadata.Labels[ownerLabel] == "" {
 			f.t.Errorf("applied %s", body)
 		}
 		f.objects[name] = obj
@@ -108,10 +110,14 @@ func newFake(t *testing.T) (*fakeAPI, *Syncer, string) {
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	writeToken(t, tokenFile, "one")
 
-	syncer := NewSyncer(newClient(server.URL, "dns", tokenFile, server.Client()), slog.New(slog.DiscardHandler), metrics.NewRegistry())
+	return api, newSyncer(server, tokenFile, "homelab"), tokenFile
+}
+
+func newSyncer(server *httptest.Server, tokenFile, ownershipID string) *Syncer {
+	syncer := NewSyncer(newClient(server.URL, "dns", ownershipID, tokenFile, server.Client()), slog.New(slog.DiscardHandler), metrics.NewRegistry())
 	clock := time.Date(2026, 10, 16, 9, 0, 0, 0, time.UTC)
 	syncer.now = func() time.Time { return clock }
-	return api, syncer, tokenFile
+	return syncer
 }
 
 func writeToken(t *testing.T, file, token string) {
@@ -139,7 +145,7 @@ func TestSyncWritesOnlyWhatChanged(t *testing.T) {
 
 	syncer.now = func() time.Time { return time.Date(2026, 10, 16, 9, 5, 0, 0, time.UTC) }
 	syncer.sync(ctx, []Record{rec("a.lan", Ready, "10.0.0.1"), rec("b.lan", Ready, "10.0.0.2")})
-	if got, want := api.takeCalls(), []string{"PATCH a.a.lan"}; !slices.Equal(got, want) {
+	if got, want := api.takeCalls(), []string{"GET " + collection, "PATCH a.a.lan"}; !slices.Equal(got, want) {
 		t.Errorf("second sync: %v, want %v", got, want)
 	}
 	if got := api.objects["a.a.lan"].Status.LastTransitionTime; got != "2026-10-16T09:05:00Z" {
@@ -148,7 +154,7 @@ func TestSyncWritesOnlyWhatChanged(t *testing.T) {
 
 	// A new target is no new state: the transition time stays.
 	syncer.sync(ctx, []Record{rec("a.lan", Ready, "10.0.0.9")})
-	if got, want := api.takeCalls(), []string{"PATCH a.a.lan", "DELETE a.b.lan"}; !slices.Equal(got, want) {
+	if got, want := api.takeCalls(), []string{"GET " + collection, "PATCH a.a.lan", "DELETE a.b.lan"}; !slices.Equal(got, want) {
 		t.Errorf("third sync: %v, want %v", got, want)
 	}
 	if obj := api.objects["a.a.lan"]; obj.Status.LastTransitionTime != "2026-10-16T09:05:00Z" || !slices.Equal(obj.Spec.Targets, []string{"10.0.0.9"}) {
@@ -174,14 +180,61 @@ func TestSyncPicksUpAfterARestart(t *testing.T) {
 	}
 }
 
+func TestSyncRestoresWhatWasDeletedByHand(t *testing.T) {
+	api, syncer, _ := newFake(t)
+	ctx := context.Background()
+	records := []Record{rec("a.lan", Ready, "10.0.0.1")}
+
+	syncer.sync(ctx, records)
+	delete(api.objects, "a.a.lan")
+	api.takeCalls()
+
+	syncer.sync(ctx, records)
+	if got, want := api.takeCalls(), []string{"GET " + collection, "PATCH a.a.lan"}; !slices.Equal(got, want) {
+		t.Errorf("after a manual delete: %v, want %v", got, want)
+	}
+}
+
+func TestSyncLeavesAnotherOwnersObjects(t *testing.T) {
+	api, syncer, tokenFile := newFake(t)
+	ctx := context.Background()
+	syncer.sync(ctx, []Record{rec("a.lan", Ready, "10.0.0.1")})
+
+	server := httptest.NewServer(api)
+	t.Cleanup(server.Close)
+	other := newSyncer(server, tokenFile, "")
+	other.sync(ctx, []Record{rec("b.lan", Ready, "10.0.0.2")})
+	syncer.sync(ctx, []Record{rec("a.lan", Ready, "10.0.0.1")})
+
+	if _, ok := api.objects["a.b.lan"]; !ok {
+		t.Error("an instance deleted the object of another")
+	}
+	if got := api.objects["a.b.lan"].Metadata.Labels[ownerLabel]; got != "none" {
+		t.Errorf("owner label without ownership = %q, want none", got)
+	}
+}
+
+func TestOwnerValue(t *testing.T) {
+	if got := ownerValue(""); got != "none" {
+		t.Errorf(`ownerValue("") = %q, want none`, got)
+	}
+	if got := ownerValue("homelab"); got != "homelab" {
+		t.Errorf("ownerValue(homelab) = %q", got)
+	}
+	// A space is no label value: hashed.
+	if got := ownerValue("home lab"); !labelValue.MatchString(got) || len(got) != 16 {
+		t.Errorf("ownerValue(home lab) = %q, want a 16-character hash", got)
+	}
+}
+
 func TestSyncSurvivesARefusingAPIServer(t *testing.T) {
 	api, syncer, _ := newFake(t)
 	api.refuse = http.StatusForbidden
 	ctx := context.Background()
 
 	syncer.sync(ctx, []Record{rec("a.lan", Ready, "10.0.0.1")})
-	if len(api.objects) != 0 || len(syncer.written) != 0 {
-		t.Fatalf("a refused write was recorded as written")
+	if len(api.objects) != 0 {
+		t.Fatalf("a refused write was stored")
 	}
 	err := syncer.client.apply(ctx, &object{})
 	if err == nil || !strings.Contains(err.Error(), "openwrtrecords is forbidden") {
@@ -204,7 +257,7 @@ func TestEveryRequestReadsTheTokenAgain(t *testing.T) {
 	writeToken(t, tokenFile, "two")
 	syncer.sync(ctx, []Record{rec("a.lan", Pending, "10.0.0.1")})
 
-	if want := []string{"Bearer one", "Bearer one", "Bearer two"}; !slices.Equal(api.tokens, want) {
+	if want := []string{"Bearer one", "Bearer one", "Bearer two", "Bearer two"}; !slices.Equal(api.tokens, want) {
 		t.Errorf("tokens = %v, want %v", api.tokens, want)
 	}
 }
@@ -276,7 +329,7 @@ func TestNewTrustsTheClusterCA(t *testing.T) {
 	}
 	writeToken(t, filepath.Join(dir, "token"), "one")
 
-	client, err := New(server.URL, filepath.Join(dir, "ca.crt"), filepath.Join(dir, "token"), "dns")
+	client, err := New(server.URL, filepath.Join(dir, "ca.crt"), filepath.Join(dir, "token"), "dns", "homelab")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +337,7 @@ func TestNewTrustsTheClusterCA(t *testing.T) {
 		t.Errorf("list over TLS: %v", err)
 	}
 
-	if _, err := New(server.URL, filepath.Join(dir, "token"), filepath.Join(dir, "token"), "dns"); err == nil {
+	if _, err := New(server.URL, filepath.Join(dir, "token"), filepath.Join(dir, "token"), "dns", "homelab"); err == nil {
 		t.Error("a CA file holding no certificate was accepted")
 	}
 }
