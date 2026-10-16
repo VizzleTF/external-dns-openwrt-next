@@ -16,7 +16,9 @@ spec:
     - name: http
       port: 7979
       targetPort: http
+    # By number: the webhook is an init container, and named ports are
+    # looked up in the regular containers.
     - name: http-webhook
       port: 8080
-      targetPort: http-webhook
+      targetPort: 8080
 {{- end }}
