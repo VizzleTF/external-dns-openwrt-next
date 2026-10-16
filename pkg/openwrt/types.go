@@ -65,7 +65,7 @@ func CanonicalName(name string) string {
 // Matching on the name alone (as this provider used to do) is wrong for
 // endpoints that carry several targets — every UCI section sharing the name
 // looks identical, so an arbitrary one gets deleted. UCI section order is not
-// stable either, since `uci get_all` is unmarshalled into a map.
+// stable either, since `uci get` is unmarshalled into a map.
 func (r DNSRecord) Key() string {
 	c := r.canonical()
 	return c.Type + "|" + c.Name + "|" + c.Value
