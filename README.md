@@ -129,7 +129,7 @@ with the marker — instead of getting a duplicate next to it.
 
 | Variable | Default | Meaning |
 | -------- | ------- | ------- |
-| `PROVIDER_OPENWRT_OWNERSHIPID` | *(empty)* | Marker value. **Empty disables ownership and every section is reported — do not combine that with `policy: sync`.** Give each ExternalDNS instance writing to the same router a distinct ID. |
+| `PROVIDER_OPENWRT_OWNERSHIPID` | — | Marker value, required: the webhook does not start without it. Give each ExternalDNS instance writing to the same router a distinct ID. **An explicit empty value disables ownership and every section is reported — set it only with a registry that keeps ownership itself, such as the [CRD registry](#alternative-the-crd-registry), and never with `policy: sync` otherwise.** |
 
 ### Registry: `noop`, not `txt`
 
@@ -174,9 +174,9 @@ re-creates it; the UCI marker, being on the router, survives a lost cluster and
 keeps `Records()` honest. The CRD registry is also alpha, and its API is
 in-cluster only.
 
-Leave `PROVIDER_OPENWRT_OWNERSHIPID` empty when using it — the marker is then
-pure overhead. The two can be combined, but only the registry decides what is
-planned.
+Set `PROVIDER_OPENWRT_OWNERSHIPID` to an empty value when using it — the marker
+is then pure overhead. The two can be combined, but only the registry decides
+what is planned.
 
 ### Migrating an existing deployment
 
@@ -286,7 +286,7 @@ for it rather than writing the same records a second time.
 | `PROVIDER_OPENWRT_LUCIRPC_PORT` | `443` | uhttpd port |
 | `PROVIDER_OPENWRT_LUCIRPC_SSL` | `true` | Use HTTPS |
 | `PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME` / `_PASSWORD` | — | `root` or an rpcd login, see [Router requirements](#router-requirements) |
-| `PROVIDER_OPENWRT_OWNERSHIPID` | *(empty)* | See [Ownership](#ownership--required-before-policy-sync) |
+| `PROVIDER_OPENWRT_OWNERSHIPID` | — | Required, empty disables ownership, see [Ownership](#ownership--required-before-policy-sync) |
 | `ROUTER_ADDRESS` | `127.0.0.1` | Address the provider API binds to |
 | `ROUTER_PORT` | `8888` | Port the provider API listens on |
 | `ROUTER_HEALTHCHECK_PORT` | `8080` | Port `/healthz` and `/metrics` listen on, on every interface |

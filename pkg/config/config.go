@@ -10,7 +10,9 @@
 //	provider.openwrt.lucirpc.hostname -> PROVIDER_OPENWRT_LUCIRPC_HOSTNAME
 //
 // which is exactly the naming viper produced. Unset variables leave the
-// existing (default) value untouched; unknown variables are ignored.
+// existing (default) value untouched, unless the field is tagged
+// `required:"true"`, which makes an unset variable an error while an empty
+// value is still accepted; unknown variables are ignored.
 package config
 
 import (
@@ -46,7 +48,7 @@ func bind(structValue reflect.Value, path []string) error {
 
 		fieldPath := append(append([]string{}, path...), field.Tag.Get("mapstructure"))
 
-		if err := bindField(structValue.Field(i), fieldPath); err != nil {
+		if err := bindField(structValue.Field(i), fieldPath, field.Tag.Get("required") == "true"); err != nil {
 			return err
 		}
 	}
@@ -54,7 +56,7 @@ func bind(structValue reflect.Value, path []string) error {
 	return nil
 }
 
-func bindField(value reflect.Value, path []string) error {
+func bindField(value reflect.Value, path []string, required bool) error {
 	switch value.Kind() {
 	case reflect.Pointer:
 		if value.Type().Elem().Kind() != reflect.Struct {
@@ -69,14 +71,17 @@ func bindField(value reflect.Value, path []string) error {
 		return bind(value, path)
 
 	default:
-		return setLeaf(value, path)
+		return setLeaf(value, path, required)
 	}
 }
 
-func setLeaf(value reflect.Value, path []string) error {
+func setLeaf(value reflect.Value, path []string, required bool) error {
 	key := envKey(path)
 	raw, ok := os.LookupEnv(key)
 	if !ok {
+		if required {
+			return fmt.Errorf("%s is not set", key)
+		}
 		return nil
 	}
 

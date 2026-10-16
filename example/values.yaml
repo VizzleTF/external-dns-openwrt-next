@@ -52,9 +52,10 @@ provider:
       # Serves /healthz and /metrics.
       - name: ROUTER_HEALTHCHECK_PORT
         value: "8080"
-      # Ownership: only records carrying this marker are managed. Required
-      # before policy=sync, otherwise ExternalDNS may delete records it did
-      # not create. Empty disables ownership.
+      # Ownership: only records carrying this marker are managed. The webhook
+      # does not start without it. An empty value disables ownership: only
+      # with a registry that keeps ownership itself, never with policy=sync
+      # otherwise, or ExternalDNS deletes records it did not create.
       - name: PROVIDER_OPENWRT_OWNERSHIPID
         value: external-dns
       - name: PROVIDER_OPENWRT_LUCIRPC_HOSTNAME

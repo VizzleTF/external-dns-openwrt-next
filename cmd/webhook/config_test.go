@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/config"
@@ -64,6 +65,9 @@ func TestEnvironmentVariableNames(t *testing.T) {
 }
 
 func TestDefaultsSurviveAnEmptyEnvironment(t *testing.T) {
+	// The one variable without a default.
+	t.Setenv("PROVIDER_OPENWRT_OWNERSHIPID", "homelab")
+
 	cfg := defaultConfig()
 	if err := config.Read(cfg); err != nil {
 		t.Fatalf("read config: %v", err)
@@ -78,8 +82,14 @@ func TestDefaultsSurviveAnEmptyEnvironment(t *testing.T) {
 	if cfg.Router.HealthCheckPort != "8080" {
 		t.Errorf("healthcheck port: got %q, want 8080", cfg.Router.HealthCheckPort)
 	}
-	if cfg.Provider.OpenWRT.OwnershipID != "" {
-		t.Errorf("ownership must stay off by default, got %q", cfg.Provider.OpenWRT.OwnershipID)
+}
+
+func TestOwnershipIDIsRequired(t *testing.T) {
+	// Unset would otherwise mean ownership off, and policy=sync then deletes
+	// every record on the router the cluster does not ask for.
+	err := config.Read(defaultConfig())
+	if err == nil || !strings.Contains(err.Error(), "PROVIDER_OPENWRT_OWNERSHIPID") {
+		t.Fatalf("got %v, want an error naming PROVIDER_OPENWRT_OWNERSHIPID", err)
 	}
 }
 
@@ -100,6 +110,7 @@ func TestAnEmptyValueIsNotTheSameAsUnset(t *testing.T) {
 }
 
 func TestInvalidNumberIsReported(t *testing.T) {
+	t.Setenv("PROVIDER_OPENWRT_OWNERSHIPID", "")
 	t.Setenv("PROVIDER_OPENWRT_LUCIRPC_PORT", "not-a-number")
 
 	if err := config.Read(defaultConfig()); err == nil {

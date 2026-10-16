@@ -20,6 +20,12 @@
 - **`PROVIDER_OPENWRT_LUCIRPC_HOSTNAME` is required.** It had no default, so an
   unset hostname only failed on the first call to the router; it now fails at
   startup.
+- **`PROVIDER_OPENWRT_OWNERSHIPID` is required.** Unset used to mean ownership
+  off, so a deployment that forgot it reported every section on the router,
+  and `policy: sync` deleted every record the cluster did not ask for. The
+  webhook now refuses to start without it. Set it to an empty value to keep
+  ownership off on purpose, which is safe only with a registry that keeps
+  ownership itself, such as the CRD registry.
 
 ### Fixed
 
