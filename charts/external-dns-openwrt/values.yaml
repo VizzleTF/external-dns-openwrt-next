@@ -1,0 +1,148 @@
+# -- (string) Required. Only records carrying this marker on the router are
+# managed: reported to ExternalDNS, updated and deleted. Keep it the same for
+# the life of the install, see "Changing the ownership ID" in the README. An
+# explicit empty string disables ownership: every domain/cname section then
+# counts as this provider's, so the chart refuses "" with `policy: sync`,
+# which would delete every record the cluster does not ask for.
+ownershipID:
+
+router:
+  # -- (string) Required. Router address, as a name or an IP.
+  hostname:
+  # -- uhttpd port.
+  port: 443
+  # -- Use HTTPS. See "TLS" in the README before turning it off.
+  tls: true
+  # -- Skip verifying the router's certificate. The password goes to whoever
+  # answers in the router's place.
+  insecureSkipVerify: false
+  # -- Seconds one call to the router may take.
+  timeout: 15
+  # -- `root`, or an rpcd login that can write `dhcp` only (safer), see
+  # "Router requirements" in the README.
+  username: external-dns
+  # -- (string) The login's password. The chart keeps it in a Secret of its
+  # own. Leave empty and set `existingSecret` to keep it out of the values.
+  password:
+  # -- (string) Name of an existing Secret holding the password.
+  existingSecret:
+  # -- Key of the password in `existingSecret`.
+  existingSecretPasswordKey: password
+  # -- Trust a CA or the router's own certificate (PEM) from an existing
+  # ConfigMap or Secret, in addition to the system roots. uhttpd's generated
+  # certificate is DER: convert it with
+  # `openssl x509 -inform der -in uhttpd.crt -out openwrt.pem`.
+  caBundle:
+    # -- (string) ConfigMap holding the PEM. Set this or `secretName`.
+    configMapName:
+    # -- (string) Secret holding the PEM.
+    secretName:
+    # -- Key of the PEM in it.
+    key: ca.crt
+
+# -- Mirror each record's status into `OpenWrtRecord` objects in the release
+# namespace, for `kubectl get owr`. Grants the webhook a Role on them there.
+recordStatus:
+  enabled: true
+
+externalDNS:
+  image:
+    repository: registry.k8s.io/external-dns/external-dns
+    tag: v0.22.0
+    pullPolicy: IfNotPresent
+  # -- Kubernetes objects to read records from; the chart grants read access
+  # to these only. Any of `service`, `ingress`, `crd` (DNSEndpoint objects),
+  # `gateway-httproute`, `gateway-grpcroute`, `gateway-tlsroute`,
+  # `gateway-tcproute`, `gateway-udproute`.
+  sources:
+    - service
+    - ingress
+  # -- Required. Names this install may publish and, with `policy: sync`,
+  # delete.
+  # Without a filter, anyone who can create an Ingress or a Service can answer
+  # any name for the whole LAN, and sync can delete any name on the router.
+  domainFilters: []
+  # -- `sync` deletes the records the cluster no longer asks for,
+  # `upsert-only` never deletes.
+  policy: sync
+  # -- Time between two reconciles.
+  interval: 1m
+  logLevel: info
+  logFormat: json
+  # -- More ExternalDNS flags, such as `--label-filter=...` or
+  # `--annotation-prefix=external-dns.alpha.kubernetes.io/` for the annotations
+  # ExternalDNS used before v0.22.0.
+  extraArgs: []
+  resources: {}
+
+webhook:
+  image:
+    repository: ghcr.io/vizzletf/external-dns-openwrt-next
+    # -- (string) Defaults to the chart's appVersion.
+    tag:
+    pullPolicy: IfNotPresent
+  # -- `debug`, `info`, `warn` or `error`.
+  logLevel: info
+  # -- `json` or `console`.
+  logEncoding: json
+  # -- More environment variables for the webhook container.
+  extraEnv: []
+  resources: {}
+
+serviceAccount:
+  create: true
+  # -- (string) Defaults to the release's full name.
+  name:
+  annotations: {}
+
+rbac:
+  # -- Create the ClusterRole for the sources and, with `recordStatus`, the
+  # Role for the status objects. Off: bind them yourself.
+  create: true
+
+# -- Pod security context. Restricted Pod Security Standard.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Security context of both containers. Neither writes to disk or needs a
+# privilege.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  privileged: false
+  capabilities:
+    drop: ["ALL"]
+
+# -- Entries for the pod's /etc/hosts, for instance to reach the router by
+# the name `OpenWrt` that its generated certificate holds.
+hostAliases: []
+
+imagePullSecrets: []
+podAnnotations: {}
+podLabels: {}
+# -- Labels added to every object.
+commonLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+service:
+  # -- A ClusterIP Service for the two metrics ports: ExternalDNS on 7979 and
+  # the webhook on 8080. The provider API stays on loopback either way.
+  enabled: true
+
+serviceMonitor:
+  # -- Create a Prometheus Operator ServiceMonitor scraping both metrics
+  # endpoints. Needs `service.enabled`.
+  enabled: false
+  interval: ""
+  scrapeTimeout: ""
+  # -- Labels a Prometheus selects ServiceMonitors by.
+  additionalLabels: {}
