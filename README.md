@@ -78,7 +78,7 @@ ExternalDNS has no leader election and two pods would apply every change set
 twice. Both containers run under the restricted Pod Security Standard.
 
 **CRDs.** The chart ships the `OpenWrtRecord` CRD, and the `DNSEndpoint` CRD
-of ExternalDNS v0.22.0 for the `crd` source, in `crds/`. Helm installs them
+of ExternalDNS v0.23.0 for the `crd` source, in `crds/`. Helm installs them
 once and never upgrades or deletes them, and skips one that already exists. A
 release that changes them says so in the changelog; apply them then with
 `helm show crds oci://ghcr.io/vizzletf/charts/external-dns-openwrt --version X.Y.Z | kubectl apply --server-side -f -`.
@@ -243,7 +243,7 @@ ExternalDNS v0.22.0 added the `crd` registry, which keeps ownership in
 in TXT records. It is the upstream answer to a provider whose backing store has
 no TXT support, and it needs nothing from this webhook, but this chart runs
 `noop` only: deploy ExternalDNS yourself, for instance with the upstream chart
-1.22.0 (`registry: crd`, `txtOwnerId`), to use it.
+(`registry: crd`, `txtOwnerId`), to use it.
 
 The objects go into the namespace `--namespace` names, `default` when it is
 unset. The registry has no flag of its own for that: `--namespace` also limits
@@ -328,10 +328,10 @@ The [chart](#installation) sets the variables below from its values; they
 matter on their own only when running the webhook some other way. See
 [docs/local.md](docs/local.md) for a local setup.
 
-The chart runs ExternalDNS v0.22.0, whose annotations lost the `alpha` prefix
-and have no fallback: use `external-dns.kubernetes.io/hostname`, or add
-`--annotation-prefix=external-dns.alpha.kubernetes.io/` to
-`externalDNS.extraArgs`.
+The chart runs ExternalDNS v0.23.0. Annotations lost the `alpha` prefix in
+v0.22.0: use `external-dns.kubernetes.io/hostname`, or add
+`--enable-legacy-annotation-prefix` to `externalDNS.extraArgs` to read the old
+ones as well while moving.
 
 The webhook itself speaks the same wire contract to every ExternalDNS version
 that has a webhook provider (v0.14 onwards).

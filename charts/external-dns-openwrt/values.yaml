@@ -48,7 +48,7 @@ recordStatus:
 externalDNS:
   image:
     repository: registry.k8s.io/external-dns/external-dns
-    tag: v0.22.0
+    tag: v0.23.0
     pullPolicy: IfNotPresent
   # -- Kubernetes objects to read records from; the chart grants read access
   # to these only. Any of `service`, `ingress`, `crd` (DNSEndpoint objects),
@@ -70,8 +70,8 @@ externalDNS:
   logLevel: info
   logFormat: json
   # -- More ExternalDNS flags, such as `--label-filter=...` or
-  # `--annotation-prefix=external-dns.alpha.kubernetes.io/` for the annotations
-  # ExternalDNS used before v0.22.0.
+  # `--enable-legacy-annotation-prefix` to also read the
+  # `external-dns.alpha.kubernetes.io/` annotations used before v0.22.0.
   extraArgs: []
   resources: {}
 

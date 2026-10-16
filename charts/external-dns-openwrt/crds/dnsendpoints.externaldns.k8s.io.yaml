@@ -1,5 +1,5 @@
-# From ExternalDNS v0.22.0 (chart 1.22.0), Apache-2.0, unchanged. Needed by the
-# `crd` source.
+# From ExternalDNS v0.22.0 (chart 1.22.0), Apache-2.0, unchanged; v0.23.0
+# ships the same. Needed by the `crd` source.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
