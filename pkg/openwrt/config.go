@@ -23,9 +23,10 @@ type Config struct {
 	// also holds manually maintained entries. An unmarked section that already
 	// matches a record exactly is adopted rather than duplicated.
 	//
-	// Empty (the default) disables ownership entirely and every domain/cname
-	// section is reported — do NOT combine that with `policy: sync`.
-	OwnershipID string `mapstructure:"ownershipID"`
+	// Required, so that ownership is never off by omission. Empty disables it
+	// entirely and every domain/cname section is reported — do NOT combine
+	// that with `policy: sync`.
+	OwnershipID string `mapstructure:"ownershipID" required:"true"`
 }
 
 func DefaultConfig() *Config {
