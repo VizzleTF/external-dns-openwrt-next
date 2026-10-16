@@ -46,6 +46,9 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- if and (not .Values.router.password) (not .Values.router.existingSecret) }}
 {{- fail "set router.password or router.existingSecret" }}
 {{- end }}
+{{- if and .Values.router.password .Values.router.existingSecret }}
+{{- fail "set router.password or router.existingSecret, not both" }}
+{{- end }}
 {{- if and .Values.router.caBundle.configMapName .Values.router.caBundle.secretName }}
 {{- fail "router.caBundle: set configMapName or secretName, not both" }}
 {{- end }}

@@ -27,10 +27,14 @@ refused() {
 }
 
 minimal=$chart/ci/minimal-values.yaml
+echo "=== as a subchart"
+helm template ci "$chart" -n ci -f "$minimal" --set global.imageRegistry=example.com >/dev/null
+
 echo "=== refusals"
 refused "ownershipID is required" -f "$minimal" --set ownershipID=null
 refused "router.hostname is required" -f "$minimal" --set router.hostname=null
 refused "set router.password or router.existingSecret" -f "$minimal" --set router.password=null
+refused "not both" -f "$minimal" --set router.existingSecret=openwrt
 refused "externalDNS.domainFilters is required" -f "$minimal" --set 'externalDNS.domainFilters=null'
 refused "with policy sync" -f "$minimal" --set ownershipID=""
 refused "set configMapName or secretName, not both" -f "$minimal" \

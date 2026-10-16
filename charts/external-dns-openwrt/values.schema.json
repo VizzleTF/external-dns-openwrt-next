@@ -3,6 +3,7 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "global": { "type": "object", "description": "Set by a parent chart; unused." },
     "ownershipID": { "type": ["string", "null"] },
     "router": {
       "type": "object",
