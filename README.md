@@ -75,7 +75,9 @@ What the provider needs is not configurable: `--registry=noop` (see below),
 `--managed-record-types` `A` and `CNAME`, the provider API on loopback, a
 60 s webhook write timeout, and one replica with the `Recreate` strategy, since
 ExternalDNS has no leader election and two pods would apply every change set
-twice. Both containers run under the restricted Pod Security Standard.
+twice. The webhook runs as a native sidecar, up before ExternalDNS, which
+exits when it finds no webhook at startup, so the chart needs Kubernetes 1.29
+or later. Both containers run under the restricted Pod Security Standard.
 
 **CRDs.** The chart ships the `OpenWrtRecord` CRD, and the `DNSEndpoint` CRD
 of ExternalDNS v0.23.0 for the `crd` source, in `crds/`. Helm installs them
@@ -108,9 +110,17 @@ values set is now built in.
 Keep the same `ownershipID`, or the records on the router are orphaned, see
 [Changing the ownership ID](#changing-the-ownership-id). Uninstall the old
 release before installing this one, so that two ExternalDNS instances never
-write at once. A CRD and a Role applied by hand for the record status can go:
-the chart adopts nothing, but it skips the existing CRD, which is the same
-one, and creates its own Role.
+write at once.
+
+Objects made by hand for the record status mirror need care, because Helm
+refuses to install over an object it does not own:
+
+- **Role, RoleBinding, ServiceAccount** named like the release: delete them
+  before `helm install`, or it fails with `exists and cannot be imported into
+  the current release`. The chart creates its own. To keep a ServiceAccount,
+  set `serviceAccount.create: false` and `serviceAccount.name`.
+- **The `OpenWrtRecord` CRD** can stay: Helm skips a CRD in `crds/` that
+  already exists, and it is the same one.
 
 ## What this fork changes
 
@@ -178,8 +188,9 @@ uci commit rpcd
 /etc/init.d/rpcd restart
 ```
 
-Then set `PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME=external-dns` and the
-password. Any user but `root` needs an rpcd login like this one: a system
+This is the chart's default `router.username`; give the password in
+`router.existingSecret`, or set `PROVIDER_OPENWRT_LUCIRPC_AUTH_USERNAME` and
+`_PASSWORD` when running the webhook without the chart. Any user but `root` needs an rpcd login like this one: a system
 account alone cannot log in to ubus.
 
 ## Ownership — required before `policy: sync`
