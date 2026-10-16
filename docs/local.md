@@ -35,8 +35,12 @@ skaffold builds the webhook with ko, imports the image into the k3d cluster
 
 ```
 kubectl logs deploy/external-dns -c webhook
+kubectl get owr
 nslookup cname.foobar.io <router>
 ```
+
+`kubectl get owr` lists the record status the webhook mirrors from
+`example/record-status.yaml`, which skaffold applies too.
 
 `Ctrl+C` in `skaffold dev` removes what it deployed. The records it wrote stay
 on the router until you delete them from `/etc/config/dhcp`. Then:

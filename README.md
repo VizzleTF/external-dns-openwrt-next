@@ -309,6 +309,8 @@ for it rather than writing the same records a second time.
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
 | `LOG_ENCODING` | `json` | `json` or `console` |
 | `SHUTDOWN_TIMEOUT_SECONDS` | `5` | Graceful shutdown budget |
+| `PROVIDER_STATUS_ENABLED` | `false` | Mirror each record's status into `OpenWrtRecord` objects, see [Record status](#record-status) |
+| `PROVIDER_STATUS_NAMESPACE` | pod's own | Namespace those objects are written to |
 
 ### TLS
 
@@ -353,6 +355,56 @@ SDK for three structs. See [CHANGELOG.md](./CHANGELOG.md#v060).
 `/metrics` is served on the observability port, in the Prometheus text format,
 written by hand for the same reason — see [Metrics](#metrics).
 
+## Record status
+
+With `PROVIDER_STATUS_ENABLED=true` the webhook keeps one `OpenWrtRecord`
+object per record, so whether a record made it onto the router is one
+`kubectl` call away:
+
+```console
+$ kubectl get owr
+NAME                 DNS NAME     TYPE    TARGETS        STATE      REASON                                                                      SINCE
+a-60342aebe9aefdf1   *.apps.lan   A       ["10.0.0.9"]   Rejected   dnsmasq does not expand wildcard names                                      22s
+a.nas.lan            nas.lan      A       ["10.0.0.5"]   Ready                                                                                  22s
+a.old.lan            old.lan      A       ["10.0.0.2"]   Orphan     not requested by ExternalDNS                                                32s
+cname.git.lan        git.lan      CNAME   ["nas.lan"]    Conflict   alias already has a CNAME to old-git.lan in section manual_git (owner "")   22s
+```
+
+| State | Meaning |
+| ----- | ------- |
+| `Ready` | The router holds the record as ExternalDNS asks for it. |
+| `Pending` | Asked for, and the router does not hold it — or holds other targets, named in the reason — yet. |
+| `Conflict` | Left out so that dnsmasq keeps starting, see [Records that would stop dnsmasq](#records-that-would-stop-dnsmasq). Stays until the other section is gone. |
+| `Error` | The last change set carrying it failed; the reason is the error. ExternalDNS tries again on its next run. |
+| `Rejected` | Dropped in `AdjustEndpoints`, so never planned: a wildcard, a CNAME with two targets, or a name or target dnsmasq cannot take. |
+| `Orphan` | A record of this provider on the router that nothing asks for any more. `policy: sync` deletes it, `upsert-only` leaves it. |
+
+It is a mirror, not an interface: nothing reads it back, edits are overwritten
+on the next run, and the router stays the only source of truth. ExternalDNS
+sends no reference to the Ingress or Service a record came from, so the objects
+cannot point at one.
+
+To enable it, apply [example/record-status.yaml](example/record-status.yaml) —
+the CRD, and a Role and RoleBinding letting the ExternalDNS service account
+write the objects in its own namespace; fix the subject if the release is not
+named `external-dns` in `default` — then set the variable. An API server that
+refuses a write costs a warning and
+`external_dns_openwrt_status_errors_total`, never a change set.
+
+Two limits follow from what the webhook is shown:
+
+- **`Rejected` ignores `--domain-filter`.** `AdjustEndpoints` gets every
+  endpoint the sources produce, before the filter applies, so a wildcard on a
+  public Ingress shows up as rejected here though ExternalDNS would never have
+  sent it to this provider.
+- **A record outside the filter is not shown.** For the same reason, a record
+  that is neither on the router nor ever carried by a change set of this
+  process is left out: it is most likely filtered away. A new record appears
+  once its first change set has run.
+
+With ownership disabled, every `domain`/`cname` section on the router counts as
+this provider's, so hand-made ones show up as `Orphan`.
+
 ## Metrics
 
 `GET :8080/metrics`, in the Prometheus text exposition format; the chart can
@@ -368,6 +420,7 @@ scrape it through
 | `external_dns_openwrt_planned_endpoints_total{action}` | counter | Endpoints ExternalDNS asked for, by `create`/`update`/`delete`. Flat lines are a quiet cluster; a steady climb is a plan that never converges. |
 | `external_dns_openwrt_apply_changes_total{result}` | counter | Change sets applied, `success` or `error`. |
 | `external_dns_openwrt_last_apply_success_timestamp_seconds` | gauge | When a change set last reached the router. It stands still while nothing changes, so it makes no staleness alert: alert on `time() - external_dns_controller_last_sync_timestamp_seconds` instead, which ExternalDNS sets after every successful run. |
+| `external_dns_openwrt_status_errors_total{operation}` | counter | Failed `list`/`apply`/`delete` calls of the [record status](#record-status) mirror. Usually a missing CRD or RBAC; the webhook carries on regardless. |
 | `external_dns_openwrt_dropped_endpoints_total{record_type}` | counter | Endpoints dropped in `AdjustEndpoints`, by type — `AAAA` from a dual-stack Service, `PTR` from `--create-ptr`, anything UCI has no section for, and `A`/`CNAME` with a wildcard name, a name or target dnsmasq cannot take, or, for a CNAME, more than one target. The type is the actionable part: it says which flag to narrow, or that an annotation needs fixing. |
 
 No client library: the exposition format is a few lines per metric, and
