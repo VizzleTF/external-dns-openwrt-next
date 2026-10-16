@@ -1,4 +1,4 @@
-name: publish image
+name: publish image and chart
 
 on:
   push:
@@ -53,3 +53,22 @@ jobs:
             --tags="$TAGS" \
             --image-refs=image-refs.txt
           cat image-refs.txt
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        if: github.ref_type == 'tag'
+        with:
+          version: v4.3.0
+
+      # The chart's version is the tag without its `v`, and its appVersion,
+      # the webhook image tag it defaults to, is the tag itself. A manual run
+      # from a branch publishes no chart.
+      - name: Package and push chart
+        if: github.ref_type == 'tag'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ steps.repo.outputs.value }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          echo "$GITHUB_TOKEN" | helm registry login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          helm package charts/external-dns-openwrt --version "${TAG#v}" --app-version "$TAG"
+          helm push "external-dns-openwrt-${TAG#v}.tgz" "oci://${REPO%/*}/charts"
