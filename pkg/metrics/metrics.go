@@ -26,9 +26,8 @@ import (
 // the controller's own metrics in the same pod.
 const Prefix = "external_dns_openwrt"
 
-// ContentType is the exposition format this package writes. Prometheus, the
-// OpenMetrics scrapers and the ServiceMonitor in the ExternalDNS chart all
-// accept it.
+// ContentType is the exposition format this package writes. Prometheus and
+// the OpenMetrics scrapers, the chart's ServiceMonitor included, accept it.
 const ContentType = "text/plain; version=0.0.4; charset=utf-8"
 
 type metricType string
