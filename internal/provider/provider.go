@@ -2,12 +2,12 @@ package provider
 
 import (
 	"context"
+	"log/slog"
 	"sort"
 	"strings"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/openwrt"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhookapi"
-	"log/slog"
 )
 
 // defaultTTL is what Records() reports for every record.

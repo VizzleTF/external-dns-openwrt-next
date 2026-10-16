@@ -49,6 +49,17 @@
   `?auth=<token>`, where a proxy or uhttpd log could keep it. ubus takes the
   session in the request body, and the password only at login.
 
+### Build and CI
+
+- **A manual release run moved `latest`.** `workflow_dispatch` tagged whatever
+  ref it built as `latest` too; only a pushed tag does now.
+- **The local image is built on the published image's base.** skaffold built
+  on distroless while the release, with no base set, uses ko's default,
+  `cgr.dev/chainguard/static`, so a local run did not test what ships.
+- The linter also runs errorlint and goimports, CI runs the tests once, with
+  `-race`, instead of twice, and k3d no longer forwards a port nothing
+  listens on.
+
 ### Docs
 
 - **The README says how to make TLS verification pass.** uhttpd's own
@@ -66,6 +77,8 @@
   section it did not write: one the cluster asks for exactly is adopted. It
   also lists `PROVIDER_OPENWRT_LUCIRPC_TIMEOUT` and
   `PROVIDER_OPENWRT_LUCIRPC_INSECURE_SKIP_VERIFY`.
+- `docs/local.md` describes the k3d setup as it is: no registry, what to edit
+  to reach a router, and that the records stay on it afterwards.
 
 ## v0.8.1
 

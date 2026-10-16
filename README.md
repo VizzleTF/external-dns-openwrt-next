@@ -245,7 +245,7 @@ Then start ExternalDNS with the new ID.
 Every environment variable, with its default, is listed in the
 [example values file](example/values.yaml). Deployment is via the upstream
 [external-dns helm chart](https://github.com/kubernetes-sigs/external-dns/tree/master/charts/external-dns)
-with this webhook as a sidecar — see [skaffold.yaml](skaffold.yaml) for a
+with this webhook as a sidecar — see [docs/local.md](docs/local.md) for a
 working local setup.
 
 The examples track ExternalDNS v0.22.0 (chart 1.22.0). Two of its breaking

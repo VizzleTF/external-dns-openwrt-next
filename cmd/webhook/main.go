@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,7 +15,6 @@ import (
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/metrics"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/router"
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/webhook"
-	"log/slog"
 )
 
 func main() {

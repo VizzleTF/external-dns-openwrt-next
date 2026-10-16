@@ -8,7 +8,8 @@ build:
     - image: webhook
       ko:
         dir: ./cmd/webhook
-        fromImage: gcr.io/distroless/static-debian12:nonroot
+        # ko's default, which release.yaml builds the published image on.
+        fromImage: cgr.dev/chainguard/static
 deploy:
   helm:
     releases:

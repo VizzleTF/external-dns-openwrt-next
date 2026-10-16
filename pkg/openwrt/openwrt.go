@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/netip"
 
 	"github.com/VizzleTF/external-dns-openwrt-next/pkg/ubus"
-	"log/slog"
 )
 
 const uciConfig = "dhcp"

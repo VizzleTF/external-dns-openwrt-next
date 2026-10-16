@@ -9,7 +9,3 @@ options:
       - arg: --disable=traefik,metrics-server,local-storage,network-policy
         nodeFilters:
           - server:*
-ports:
-  - port: 8080:8080
-    nodeFilters:
-      - loadbalancer
